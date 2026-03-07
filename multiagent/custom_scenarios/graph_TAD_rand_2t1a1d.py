@@ -4,7 +4,7 @@ from multiagent.scenario import BaseScenario
 from onpolicy import global_var as glv
 import sys
 # sys.path.append('/data/goufandi_space/Projects/deception_TAD_marl/onpolicy/envs/mpe/scenarios/')
-from .TAD_util import *
+from multiagent.TAD_util import *
 from scipy import sparse
 from typing import Tuple, Optional, List
 from numpy import ndarray as arr
@@ -169,6 +169,17 @@ class Scenario(BaseScenario):
         else:
             return {}
 
+    # info callback for env wrappers (counts collisions like encirclement scenario)
+    def info_callback(self, agent, world):
+        collisions = 0
+        for other in world.agents:
+            if other is agent:
+                continue
+            if self.is_collision(agent, other):
+                collisions += 1
+
+        return {"collisions": collisions}
+
     def is_collision(self, agent1, agent2):
         dist = np.linalg.norm(agent1.state.p_pos - agent2.state.p_pos)
         dist_min = agent1.size + agent2.size
@@ -223,7 +234,7 @@ class Scenario(BaseScenario):
         if not attacker.done:
             
             if attacker.last_lock == 0 and attacker.is_locked == 1:
-                r_s = - 50*np.exp(-world.world_step/10)  # 10
+                r_s = - 50*np.exp(-world.world_step/10.0)  # 10
 
             # if attacker.lock_act != attacker.is_locked or attacker.belief_act != attacker.fake_target:
             #     # 网络输出的act和实际act不一致
@@ -254,14 +265,14 @@ class Scenario(BaseScenario):
             if not attacker.is_locked:
 
                 # switch in belief
-                coef = 0.
+                coef = 1.0
                 delta_t = world.world_step - attacker.last_switch
                 if attacker.last_belief != attacker.fake_target and world.world_step>1:
                     # 目标切换了，更改t_s
                     attacker.last_switch = world.world_step
-                    r_s += reward_switch(delta_t)*coef
+                    r_s += reward_switch(delta_t/10.0)*coef
                 else:
-                    r_s += reward_keep(delta_t)*coef
+                    r_s += reward_keep(delta_t/10.0)*coef
 
 
                 # deception reward using apollonius circle
@@ -293,7 +304,7 @@ class Scenario(BaseScenario):
         # if attacker.id==2:
         #     print('r_k:', r_k, 'r_s:', r_s, 'r_p:', r_p, 'r_d:', r_d)
         
-
+        # print('reward', rew)
         return rew
 
 

@@ -61,17 +61,23 @@ class Runner(object):
         self.model_dir = self.all_args.model_dir
 
         # if not testing model
-        if not self.use_render:
+        if self.use_render:
+            import imageio
+            self.run_dir = config["run_dir"]
+            print("run dir: ", self.run_dir)
+            self.gif_dir = str(self.run_dir / 'gifs')
+            if not os.path.exists(self.gif_dir):
+                os.makedirs(self.gif_dir)
+        else:
             if self.use_wandb:
                 self.save_dir = str(wandb.run.dir)
-                self.run_dir = str(wandb.run.dir)
             else:
                 self.run_dir = config["run_dir"]
-                self.log_dir = str(self.run_dir / "logs")
+                self.log_dir = str(self.run_dir / 'logs')
                 if not os.path.exists(self.log_dir):
                     os.makedirs(self.log_dir)
                 self.writter = SummaryWriter(self.log_dir)
-                self.save_dir = str(self.run_dir / "models")
+                self.save_dir = str(self.run_dir / 'models')
                 if not os.path.exists(self.save_dir):
                     os.makedirs(self.save_dir)
 
@@ -111,7 +117,7 @@ class Runner(object):
         if self.model_dir is not None:
             print(f"Restoring from checkpoint stored in {self.model_dir}")
             self.restore()
-            self.gif_dir = self.model_dir
+            # Keep saving gifs under run_dir/gifs so output location is predictable.
 
         # algorithm
         self.trainer = TrainAlgo(self.all_args, self.policy, device=self.device)
@@ -160,8 +166,13 @@ class Runner(object):
     @torch.no_grad()
     def compute(self):
         """Calculate returns for the collected data."""
-        raise NotImplementedError
-
+        self.trainer.prep_rollout()
+        next_values = self.trainer.policy.get_values(np.concatenate(self.buffer.share_obs[-1]),
+                                                np.concatenate(self.buffer.rnn_states_critic[-1]),
+                                                np.concatenate(self.buffer.masks[-1]))
+        next_values = np.array(np.split(_t2n(next_values), self.n_rollout_threads))
+        self.buffer.compute_returns(next_values, self.trainer.value_normalizer)
+        
     def train(self):
         """Train policies with data in buffer."""
         self.trainer.prep_training()
@@ -181,6 +192,7 @@ class Runner(object):
         policy_actor_state_dict = torch.load(
             str(self.model_dir) + "/actor.pt", map_location=torch.device("cpu")
         )
+        print("model has been loaded from: ", self.model_dir)
         self.policy.actor.load_state_dict(policy_actor_state_dict)
         if not self.all_args.use_render:
             policy_critic_state_dict = torch.load(
@@ -280,7 +292,7 @@ class Runner(object):
         """
         collisions = 0
         for k, v in env_infos.items():
-            if "collision" in k:
+            if "collision" in k and len(v) > 0:
                 collisions += v[0]
         return collisions
 
@@ -304,7 +316,7 @@ class Runner(object):
         fracs = []
         success = []
         for k, v in env_infos.items():
-            if "time_to_goal" in k and "min_time_to_goal" not in k:
+            if "time_to_goal" in k and "min_time_to_goal" not in k and len(v) > 0:
                 fracs.append(v[0] / (self.all_args.episode_length * self.dt))
                 # if didn't reach goal then time_to_goal >= episode_len * dt
                 if v[0] < self.all_args.episode_length * self.dt:

@@ -282,13 +282,16 @@ def get_config():
    
     # pretrained parameters
     parser.add_argument("--model_dir", type=str, default=None, help="by default None. set the path to pretrained model.")
+   
     
     # misc parameters
     parser.add_argument("--verbose", action="store_false", default=True, help="by default, print args and network at the beginning.")
 
     # scenario settings
     parser.add_argument("--max_edge_dist", type=float, default=1.5, help="Maximum distance above which edges cannot be connected between the entities")
-    parser.add_argument("--num_target", type=int, default=0, help="the number of targets")
+    parser.add_argument("--num_target", type=int, default=2, help="the number of targets")
+    parser.add_argument("--num_attacker", type=int, default=1, help="the number of attackers (TAD scenarios)")
+    parser.add_argument("--num_defender", type=int, default=1, help="the number of defenders (TAD scenarios)")
     parser.add_argument("--num_obstacle", type=int, default=4, help="the number of obstacles")
     parser.add_argument("--num_dynamic_obs", type=int, default=4, help="the number of dynamic obstacles")
     parser.add_argument("--num_agents", type=int, default=4, help="the number of agents")

@@ -86,7 +86,7 @@ class R_Actor(nn.Module):
         masks = check(masks).to(**self.tpdv)
         if available_actions is not None:
             available_actions = check(available_actions).to(**self.tpdv)
-
+        # print("obs : ", obs)  # (5,13,6)
         actor_features = self.base(obs)
 
         if self._use_naive_recurrent_policy or self._use_recurrent_policy:
@@ -95,7 +95,7 @@ class R_Actor(nn.Module):
         actions, action_log_probs = self.act(
             actor_features, available_actions, deterministic
         )
-
+        # print("actions: {}".format(actions))  # (5,13) (5,13)
         return (actions, action_log_probs, rnn_states)
 
     def evaluate_actions(

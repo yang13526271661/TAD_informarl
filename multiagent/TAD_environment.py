@@ -4,8 +4,9 @@ from gym import spaces
 from gym.envs.registration import EnvSpec
 import numpy as np
 from .multi_discrete import MultiDiscrete
+from multiagent.TAD_core import Agent
 from onpolicy import global_var as glv
-from .scenarios.util import GetAcuteAngle
+from multiagent.TAD_util import GetAcuteAngle
 
 # update bounds to center around agent
 cam_range = 8
@@ -240,6 +241,20 @@ class MultiAgentEnv(gym.Env):
             agent.belief_act = attacker_belief
             agent.lock_act = is_locked
             
+            # if not agent.is_locked:
+            #     if is_locked:
+            #         agent.fake_target = agent.true_target
+            #         agent.is_locked = True
+            #     else:
+            #         agent.fake_target = attacker_belief
+            # else:
+            #     if is_locked:
+            #         agent.fake_target = agent.true_target
+            #     else:
+            #         # Allow relocking decisions to be reversible during rollout.
+            #         agent.is_locked = False
+            #         agent.fake_target = attacker_belief
+
             if not agent.is_locked:
                 if is_locked:
                     agent.fake_target = agent.true_target
@@ -291,7 +306,7 @@ class MultiAgentEnv(gym.Env):
                         word = alphabet[np.argmax(other.state.c)]
                     message += (other.name + ' to ' +
                                 agent.name + ': ' + word + '   ')
-            print(message)
+            # print(message)
         for i in range(len(self.viewers)):
             # create viewers (if necessary)
             if self.viewers[i] is None:
@@ -506,3 +521,166 @@ def set_JS_curriculum(CL_ratio):
     y_mid = (np.exp(-k*x)-np.exp(k*x))/(np.exp(-k*x)+np.exp(k*x))-delta*x**3
     func_ = (y_mid+1)/2
     return func_
+
+class MultiAgentGraphEnv(MultiAgentEnv):
+    metadata = {"render.modes": ["human", "rgb_array"]}
+
+    def __init__(
+        self,
+        world,
+        reset_callback=None,
+        reward_callback=None,
+        observation_callback=None,
+        graph_observation_callback=None,
+        id_callback=None,
+        info_callback=None,
+        done_callback=None,
+        update_belief=None,
+        post_step_callback=None,
+        update_graph=None,
+        shared_viewer=True,
+        discrete_action=False,
+    ) -> None:
+        super(MultiAgentGraphEnv, self).__init__(
+            world,
+            reset_callback,
+            reward_callback,
+            observation_callback,
+            info_callback,
+            done_callback,
+            update_belief,
+            post_step_callback,
+            shared_viewer,
+            discrete_action,
+        )
+        self.update_graph = update_graph
+        self.graph_observation_callback = graph_observation_callback
+        self.id_callback = id_callback
+        self.set_graph_obs_space()
+
+    def set_graph_obs_space(self):
+        self.node_observation_space = []
+        self.adj_observation_space = []
+        self.edge_observation_space = []
+        self.agent_id_observation_space = []
+        self.share_agent_id_observation_space = []
+        num_agents = len(self.agents)
+        for agent in self.agents:
+            node_obs, adj = self.graph_observation_callback(agent, self.world)
+            node_obs_dim = node_obs.shape  
+            adj_dim = adj.shape  
+            edge_dim = 1  
+            agent_id_dim = 1  
+            
+            self.node_observation_space.append(
+                spaces.Box(low=-np.inf, high=+np.inf, shape=node_obs_dim, dtype=np.float32)
+            )
+            self.adj_observation_space.append(
+                spaces.Box(low=-np.inf, high=+np.inf, shape=adj_dim, dtype=np.float32)
+            )
+            self.edge_observation_space.append(
+                spaces.Box(low=-np.inf, high=+np.inf, shape=(edge_dim,), dtype=np.float32)
+            )
+            self.agent_id_observation_space.append(
+                spaces.Box(low=-np.inf, high=+np.inf, shape=(agent_id_dim,), dtype=np.float32)
+            )
+            self.share_agent_id_observation_space.append(
+                spaces.Box(low=-np.inf, high=+np.inf, shape=(num_agents * agent_id_dim,), dtype=np.float32)
+            )
+
+    def step(self, action_n):
+        if self.update_graph is not None:
+            self.update_graph(self.world)
+        self.current_step += 1
+        obs_n, reward_n, done_n, info_n = [], [], [], []
+        node_obs_n, adj_n, agent_id_n = [], [], []
+        
+        start_ratio = 0.80
+        self.JS_thre = int(self.world_length * start_ratio * set_JS_curriculum(self.CL_ratio / self.Cp))
+
+        for i, agent in enumerate(self.agents):
+            self._set_action(action_n[i], agent, self.action_space[i])
+
+        self.world.step()
+
+        done_check = []
+        for i, agent in enumerate(self.agents):
+            obs_n.append(self._get_obs(agent))
+            agent_id_n.append(self._get_id(agent))
+            
+            node_obs, adj = self._get_graph_obs(agent)
+            node_obs_n.append(node_obs)
+            adj_n.append(adj)
+            
+            reward = self._get_reward(agent)
+            reward_n.append([reward])
+            
+            done_status = self._get_done(agent)
+            done_n.append(done_status)
+            done_check.append(agent.done)
+            
+            info = {'individual_reward': reward}
+            env_info = self._get_info(agent)
+            if 'fail' in env_info.keys():
+                info['fail'] = env_info['fail']
+            info_n.append(info)
+
+        reward_sum = np.sum(reward_n)
+        if self.shared_reward:
+            reward_n = [[reward_sum]] * self.n
+
+        if self.post_step_callback is not None:
+            self.post_step_callback(self.world)
+
+        terminate = []
+        current_dead = 0
+        attacker_belief = []
+        for agent in self.world.agents:
+            if agent.name == 'target':
+                terminate.append(agent.done)
+            if agent.name == 'attacker':
+                attacker_belief.append(agent.fake_target)
+                agent.last_belief = agent.fake_target
+                agent.last_lock = agent.is_locked
+            if agent.done:
+                current_dead += 1
+
+        self.is_ternimate = True if all(terminate) else False
+        if self.is_ternimate:
+            done_n = [True] * self.n
+
+        if self.update_belief is not None and not all(done_n):
+            if (self.current_step % 15 == 0 and self.current_step < 180) or current_dead > self.world.cnt_dead:
+                self.update_belief(self.world)
+
+        self.world.cnt_dead = current_dead
+        self.world.attacker_belief = attacker_belief
+
+        return obs_n, agent_id_n, node_obs_n, adj_n, reward_n, done_n, info_n
+
+    def reset(self):
+        self.current_step = 0
+        self.reset_callback(self.world)
+        self._reset_render()
+        
+        obs_n, node_obs_n, adj_n, agent_id_n = [], [], [], []
+        self.agents = self.world.attackers
+
+        for agent in self.agents:
+            obs_n.append(self._get_obs(agent))
+            agent_id_n.append(self._get_id(agent))
+            node_obs, adj = self._get_graph_obs(agent)
+            node_obs_n.append(node_obs)
+            adj_n.append(adj)
+
+        return obs_n, agent_id_n, node_obs_n, adj_n
+
+    def _get_graph_obs(self, agent: Agent):
+        if self.graph_observation_callback is None:
+            return None, None
+        return self.graph_observation_callback(agent, self.world)
+
+    def _get_id(self, agent: Agent):
+        if self.id_callback is None:
+            return None
+        return self.id_callback(agent)

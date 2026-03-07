@@ -71,7 +71,7 @@ class GMPERunner(Runner):
                 obs, agent_id, node_obs, adj, rewards, dones, infos = self.envs.step(
                     actions_env
                 )
-
+                # print("rewards:", rewards)
                 data = (
                     obs,
                     agent_id,
@@ -104,20 +104,49 @@ class GMPERunner(Runner):
             if episode % self.save_interval == 0 or episode == episodes - 1:
                 self.save()
 
-            # log information
+            # # log information
+            # if episode % self.log_interval == 0:
+            #     end = time.time()
+
+            #     env_infos = self.process_infos(infos)
+
+            #     avg_ep_rew = np.mean(self.buffer.rewards) * self.episode_length
+            #     train_infos["average_episode_rewards"] = avg_ep_rew
+            #     # print(
+            #     #     f"Average episode rewards is {avg_ep_rew:.3f} \t"
+            #     #     f"Total timesteps: {total_num_steps} \t "
+            #     #     f"Percentage complete {total_num_steps / self.num_env_steps * 100:.3f} \t "
+            #     #     f"CL ratio: {glv.get_value('CL_ratio')}"
+            #     # )
+            #     print("\n Scenario {} Algo {} Exp {} updates {}/{} episodes, total num timesteps {}/{}, FPS {}, CL {}.\n"
+            #             .format(self.all_args.scenario_name,
+            #                     self.algorithm_name,
+            #                     self.experiment_name,
+            #                     episode,
+            #                     episodes,
+            #                     total_num_steps,
+            #                     self.num_env_steps,
+            #                     int(total_num_steps / (end - start)),
+            #                     format(glv.get_value('CL_ratio'), '.3f')))
+            #     print("average episode rewards is {}".format(avg_ep_rew))
+            #     self.log_train(train_infos, total_num_steps)
+            #     self.log_env(env_infos, total_num_steps)
+
+            #     r = self.buffer.rewards.mean(2).sum(axis=(0, 2))
+            #     Average = np.mean(r)
+            #     Min = np.min(r)
+            #     Max = np.max(r)
+            #     Std = np.std(r)
+
+            #     if self.save_data:
+            #         file = open(self.reward_file_name+'.csv', 'a', encoding='utf-8', newline="")
+            #         writer = csv.writer(file)
+            #         writer.writerow([total_num_steps, Average, Min, Max, Std])
+            #         file.close()
+
+            # log information （for each thread）
             if episode % self.log_interval == 0:
                 end = time.time()
-
-                env_infos = self.process_infos(infos)
-
-                avg_ep_rew = np.mean(self.buffer.rewards) * self.episode_length
-                train_infos["average_episode_rewards"] = avg_ep_rew
-                # print(
-                #     f"Average episode rewards is {avg_ep_rew:.3f} \t"
-                #     f"Total timesteps: {total_num_steps} \t "
-                #     f"Percentage complete {total_num_steps / self.num_env_steps * 100:.3f} \t "
-                #     f"CL ratio: {glv.get_value('CL_ratio')}"
-                # )
                 print("\n Scenario {} Algo {} Exp {} updates {}/{} episodes, total num timesteps {}/{}, FPS {}, CL {}.\n"
                         .format(self.all_args.scenario_name,
                                 self.algorithm_name,
@@ -127,22 +156,38 @@ class GMPERunner(Runner):
                                 total_num_steps,
                                 self.num_env_steps,
                                 int(total_num_steps / (end - start)),
-                                format(glv.get_value('CL_ratio'), '.3f')))
-                print("average episode rewards is {}".format(avg_ep_rew))
-                self.log_train(train_infos, total_num_steps)
-                self.log_env(env_infos, total_num_steps)
+                                glv.get_value('CL_ratio')))
+
+                if self.env_name == "GraphMPE":
+                    env_infos = {}
+                    for agent_id in range(self.num_agents):
+                        idv_rews = []
+                        for info in infos:
+                            if 'individual_reward' in info[agent_id].keys():
+                                idv_rews.append(info[agent_id]['individual_reward'])
+                        agent_k = 'agent%i/individual_rewards' % agent_id
+                        env_infos[agent_k] = idv_rews
 
                 r = self.buffer.rewards.mean(2).sum(axis=(0, 2))
                 Average = np.mean(r)
                 Min = np.min(r)
                 Max = np.max(r)
                 Std = np.std(r)
-
+                
                 if self.save_data:
                     file = open(self.reward_file_name+'.csv', 'a', encoding='utf-8', newline="")
                     writer = csv.writer(file)
                     writer.writerow([total_num_steps, Average, Min, Max, Std])
                     file.close()
+
+                train_infos["average_episode_rewards"] = np.mean(self.buffer.rewards) * self.episode_length
+                print("average rewards:", np.mean(self.buffer.rewards))
+                print("max rewards:", np.max(self.buffer.rewards))
+                print("min rewards:", np.min(self.buffer.rewards))
+                print("episode length:", self.episode_length)
+                print("average episode rewards is {}".format(train_infos["average_episode_rewards"]))
+                self.log_train(train_infos, total_num_steps)
+                self.log_env(env_infos, total_num_steps)
 
             # eval
             if episode % self.eval_interval == 0 and self.use_eval:

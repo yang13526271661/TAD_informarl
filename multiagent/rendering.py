@@ -6,6 +6,13 @@ import os
 import six
 import sys
 
+if not os.environ.get("DISPLAY") and not os.environ.get("WAYLAND_DISPLAY"):
+    try:
+        import pyglet
+        pyglet.options['headless'] = True
+    except ImportError:
+        pass
+
 if "Apple" in sys.version:
     if "DYLD_FALLBACK_LIBRARY_PATH" in os.environ:
         os.environ["DYLD_FALLBACK_LIBRARY_PATH"] += ":/usr/lib"

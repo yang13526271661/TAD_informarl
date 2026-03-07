@@ -1,6 +1,6 @@
 import numpy as np
 import seaborn as sns
-from .scenarios.util import *
+from .TAD_util import *
 
 # physical/external base state of all entites
 class EntityState(object):
@@ -313,9 +313,9 @@ class World(object):
         # integrate physical state
         self.integrate_state(u)
 
-        # # calculate and store distances between all entities
-        # if self.cache_dists:
-        #     self.calculate_distances()
+        # calculate and store distances between all entities
+        if self.cache_dists:
+            self.calculate_distances()
 
     # gather agent action forces
     def apply_action_force(self, u):

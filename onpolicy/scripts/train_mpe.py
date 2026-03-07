@@ -197,7 +197,7 @@ def main(args):
             # home folder as {'my_wandb_api_key': 'INSERT API HERE'}
             # NOTE this is only for running on systems without internet access
             # have to run `wandb sync wandb/run_name` to sync logs to wandboard
-            os.environ["WANDB_API_KEY"] = "5aceaf53ea8aba2eca3b09e5b256acf7908efc38"
+            os.environ["WANDB_API_KEY"] = "e5b9146e7ce16fad6ec90598e7f0f7a940f20b7a"
             os.environ["WANDB_MODE"] = "online"
             # os.environ["WANDB_MODE"] = "dryrun"
             os.environ["WANDB_SAVE_CODE"] = "true"

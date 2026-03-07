@@ -42,18 +42,17 @@ def MPEEnv(args: argparse.Namespace):
     # create world
     world = scenario.make_world(args=args)
     if args.algorithm_name in ["mappo", "rmappo"]:
-        from multiagent.environment import MultiAgentPPOEnv as MultiAgentEnv
-    else:
-        from multiagent.environment import MultiAgentOffPolicyEnv as MultiAgentEnv
+        from multiagent.TAD_environment import MultiAgentEnv
+    # else:
+    #     from multiagent.environment import MultiAgentOffPolicyEnv as MultiAgentEnv
     env = MultiAgentEnv(
         world=world,
         reset_callback=scenario.reset_world,
         reward_callback=scenario.reward,
         observation_callback=scenario.observation,
-        info_callback=scenario.info_callback
-        if hasattr(scenario, "info_callback")
-        else None,
-        scenario_name=args.scenario_name,
+        info_callback=scenario.info,
+        done_callback=scenario.done,
+        update_belief=scenario.update_belief,
     )
     return env
 
@@ -68,11 +67,10 @@ def GraphMPEEnv(args):
     scenario = load(args.scenario_name + ".py").Scenario()
     # create world
     world = scenario.make_world(args=args)
-    from multiagent.environment import MultiAgentGraphEnv
+    from multiagent.TAD_environment import MultiAgentGraphEnv
 
     # create multiagent environment
     env = MultiAgentGraphEnv(
-        args=args,
         world=world,
         reset_callback=scenario.reset_world,
         reward_callback=scenario.reward,
@@ -82,7 +80,6 @@ def GraphMPEEnv(args):
         id_callback=scenario.get_id,
         info_callback=scenario.info_callback,
         # done_callback=scenario.done,
-        scenario_name=args.scenario_name,
     )
 
     return env
