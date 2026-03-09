@@ -29,7 +29,7 @@ do
     --use_lstm False --split_batch True --max_batch_size 512 --num_mini_batch 32 \
     --n_training_threads 1 --n_rollout_threads 1 --use_render True --episode_length 200 --render_episodes 5 \
     --num_attacker ${num_attacker} --num_target ${num_target} --num_defender ${num_defender} \
-    --model_dir "/data/yangxiaodi_space/TAD-informarl/InforMARL-main/onpolicy/results/MPE/graph_TAD_rand_2t1a1d/rmappo/check/wandb/run-20260305_225453-kbtz71uh/files/" \
+    --model_dir "/data/yangxiaodi_space/TAD-informarl/InforMARL-main/onpolicy/results/MPE/graph_TAD_rand_2t1a1d/rmappo/check/wandb/run-20260305_225453-kbtz71uh    --save_data ${save_data} --save_gi    --save_data ${save_data} --save_gifs ${save_gifs} --ifi 0.3" \
     --save_data ${save_data} --save_gifs ${save_gifs}
 done
 # run-20240906_105448-xu4omp79
