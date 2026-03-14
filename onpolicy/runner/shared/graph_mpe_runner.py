@@ -251,28 +251,27 @@ class GMPERunner(Runner):
             np.split(_t2n(rnn_states_critic), self.n_rollout_threads)
         )
         # rearrange action
-        if self.envs.action_space[0].__class__.__name__ == "MultiDiscrete":
+        # 这里开始修改
+        if self.envs.action_space[0].__class__.__name__ == 'MultiDiscrete':
             for i in range(self.envs.action_space[0].shape):
-                uc_actions_env = np.eye(self.envs.action_space[0].high[i] + 1)[
-                    actions[:, :, i]
-                ]
+                uc_actions_env = np.eye(self.envs.action_space[0].high[i] + 1)[actions[:, :, i]]
                 if i == 0:
                     actions_env = uc_actions_env
                 else:
                     actions_env = np.concatenate((actions_env, uc_actions_env), axis=2)
-        elif self.envs.action_space[0].__class__.__name__ == "Discrete":
+        elif self.envs.action_space[0].__class__.__name__ == 'Discrete':
             actions_env = np.squeeze(np.eye(self.envs.action_space[0].n)[actions], 2)
+        
+        # ================= 核心修复：增加对连续动作 Box 的处理 ================= #
+        elif self.envs.action_space[0].__class__.__name__ == 'Box':
+            # 连续动作直接就是受力/速度值，无需编码映射，直接赋值给环境
+            actions_env = actions
+        # ======================================================================= #
+            
         else:
             raise NotImplementedError
 
-        return (
-            values,
-            actions,
-            action_log_probs,
-            rnn_states,
-            rnn_states_critic,
-            actions_env,
-        )
+        return values, actions, action_log_probs, rnn_states, rnn_states_critic, actions_env
 
     def insert(self, data):
         (
@@ -508,6 +507,8 @@ class GMPERunner(Runner):
                             )
                 elif envs.action_space[0].__class__.__name__ == "Discrete":
                     actions_env = np.squeeze(np.eye(envs.action_space[0].n)[actions], 2)
+                elif self.envs.action_space[0].__class__.__name__ == 'Box':
+                    actions_env = actions
                 else:
                     raise NotImplementedError
 
@@ -541,12 +542,12 @@ class GMPERunner(Runner):
 
             env_infos = self.process_infos(infos)
             # print('_'*50)
-            num_collisions = self.get_collisions(env_infos)
-            frac, success = self.get_fraction_episodes(env_infos)
-            rewards_arr.append(np.mean(np.sum(np.array(episode_rewards), axis=0)))
-            frac_episode_arr.append(np.mean(frac))
-            success_rates_arr.append(success)
-            num_collisions_arr.append(num_collisions)
+            # num_collisions = self.get_collisions(env_infos)
+            # frac, success = self.get_fraction_episodes(env_infos)
+            # rewards_arr.append(np.mean(np.sum(np.array(episode_rewards), axis=0)))
+            # frac_episode_arr.append(np.mean(frac))
+            # success_rates_arr.append(success)
+            # num_collisions_arr.append(num_collisions)
 
             # print(np.mean(frac), success)
             # print("Average episode rewards is: " +
@@ -565,3 +566,4 @@ class GMPERunner(Runner):
                     all_frames,
                     duration=self.all_args.ifi,
                 )
+        print("Render complete!")

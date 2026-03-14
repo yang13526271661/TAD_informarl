@@ -9,6 +9,8 @@ from torch_geometric.data import Data, Batch
 from torch_geometric.loader import DataLoader
 from torch_geometric.nn import MessagePassing, global_mean_pool, global_max_pool, global_add_pool
 from torch_geometric.utils import add_self_loops, to_dense_batch
+from torch_geometric.nn import TransformerConv
+
 
 import argparse
 from typing import List, Tuple, Union, Optional
@@ -20,7 +22,7 @@ import torch.nn.functional as F
 
 class EmbedConv(MessagePassing):
     """
-    EmbedConv 类定义与代码1保持一致，无需修改。
+    实体嵌入与初始特征融合层
     """
     def __init__(self, 
                 input_dim:int, 
@@ -33,7 +35,9 @@ class EmbedConv(MessagePassing):
                 use_layerNorm:bool,
                 add_self_loop:bool,
                 edge_dim:int=0):
-        super(EmbedConv, self).__init__(aggr='add')
+        # [核心修复 1]：将 aggr='add' 改为 aggr='mean'！
+        # 防止在密集编队或扎堆包夹时，节点特征因为简单相加而导致数值爆炸和梯度消失
+        super(EmbedConv, self).__init__(aggr='mean')
         self._layer_N = layer_N
         self._add_self_loops = add_self_loop
         self.active_func = nn.ReLU() if use_ReLU else nn.Tanh()
@@ -42,10 +46,8 @@ class EmbedConv(MessagePassing):
 
         self.entity_embed = nn.Embedding(num_embeddings, embedding_size)
 
-        # 定义第一层线性层
         self.lin1 = nn.Linear(input_dim + embedding_size + edge_dim, hidden_size)
         
-        # 初始化隐藏层
         self.layers = nn.ModuleList()
         for _ in range(layer_N):
             self.layers.append(nn.Linear(hidden_size, hidden_size))
@@ -93,7 +95,7 @@ class EmbedConv(MessagePassing):
 class SimplifiedAttentionNet(nn.Module):
     """
     实现 Communication Enhanced Network (CEN)
-    使用多头图注意力机制（Graph Attention）和软注意力门（Soft Attention Gate）。
+    具备真正的多层堆叠、非线性激活与残差连接机制。
     """
     def __init__(self,
                 input_dim: int,
@@ -112,18 +114,18 @@ class SimplifiedAttentionNet(nn.Module):
                 embed_add_self_loop: bool,
                 max_edge_dist: float,
                 edge_dim: int = 1,
-                num_heads: int = 3):  # 新增参数：多头注意力头数
+                num_heads: int = 3,
+                concat_heads: bool = False): 
         super(SimplifiedAttentionNet, self).__init__()
         self.active_func = nn.ReLU() if use_ReLU else nn.Tanh()
         self.edge_dim = edge_dim
         self.max_edge_dist = max_edge_dist
         self.graph_aggr = graph_aggr
         self.global_aggr_type = global_aggr_type
-        self.num_heads = num_heads  # 多头数量
 
-        # 嵌入层
+        # 1. 实体嵌入与初始特征融合
         self.embed_layer = EmbedConv(
-            input_dim=input_dim - 1,  # 减1是因为 node_obs = [node_feat, entity_type]
+            input_dim=input_dim - 1,  
             num_embeddings=num_embeddings,
             embedding_size=embedding_size,
             hidden_size=embed_hidden_size,
@@ -135,50 +137,52 @@ class SimplifiedAttentionNet(nn.Module):
             edge_dim=edge_dim,
         )
 
-        # 多头注意力机制
-        self.attention_heads = nn.ModuleList([
-            nn.Sequential(
-                nn.Linear(embed_hidden_size, hidden_size),
-                self.active_func,
-                nn.Linear(hidden_size, hidden_size)
-            ) for _ in range(num_heads)
-        ])
+        # 2. [核心修复 2]：动态构建多层 GNN，恢复多跳通信与深层思考能力
+        self.attn_layers = nn.ModuleList()
+        self.norms = nn.ModuleList()
+        
+        in_channels = embed_hidden_size
+        for _ in range(layer_N):
+            self.attn_layers.append(
+                TransformerConv(
+                    in_channels=in_channels,
+                    out_channels=hidden_size,
+                    heads=num_heads,
+                    concat=concat_heads,  
+                    dropout=0.0,
+                    beta=True      
+                )
+            )
+            # 动态计算下一层的输入维度
+            out_channels = hidden_size * (num_heads if concat_heads else 1)
+            self.norms.append(nn.LayerNorm(out_channels))
+            in_channels = out_channels
 
-        # 软注意力门的权重计算模块
-        self.soft_attention_gate = nn.Sequential(
-            nn.Linear(embed_hidden_size, hidden_size),
-            self.active_func,
-            nn.Linear(hidden_size, num_heads)
-        )
-
-    def forward(self, batch: Batch, agent_id: Tensor):
-        """
-        Args:
-            batch (Batch): 包含节点特征、边索引和边属性的批量图数据。
-            agent_id (Tensor): 特定节点的索引，用于提取特定节点的特征。
-
-        Returns:
-            Tensor: 聚合后的图特征或者节点特定特征。
-        """
+    def forward(self, batch: Data, agent_id: Tensor):
         x, edge_index, edge_attr = batch.x, batch.edge_index, batch.edge_attr
+        
+        # 步骤 1：融合节点特征、类型嵌入和边特征
         x = self.embed_layer(x, edge_index, edge_attr)
 
-        # 多头注意力机制：计算每个头的特征
-        head_outputs = [head(x) for head in self.attention_heads]  # List[Tensor]
-        head_outputs = torch.stack(head_outputs, dim=-1)  # Shape: [num_nodes, hidden_size, num_heads]
+        # 步骤 2：[核心修复 3] 包含残差连接和激活函数的深层消息传递
+        for conv, norm in zip(self.attn_layers, self.norms):
+            x_new = conv(x, edge_index)
+            x_new = self.active_func(x_new)  # 非线性激活
+            x_new = norm(x_new)              # 层归一化防止梯度消失
+            
+            # 残差连接 (Residual Connection): 极大缓解图神经过平滑 (Over-smoothing)
+            if x.shape == x_new.shape:
+                x = x + x_new
+            else:
+                x = x_new
 
-        # 软注意力门：计算每个头的权重
-        alpha = self.soft_attention_gate(x)  # Shape: [num_nodes, num_heads]
-        alpha = F.softmax(alpha, dim=-1)  # 对每个头的权重进行归一化
-
-        # 聚合多头输出
-        x = (head_outputs * alpha.unsqueeze(1)).sum(dim=-1)  # Shape: [num_nodes, hidden_size]
-
-        # 如果需要，转换为稠密批量
-        x, mask = to_dense_batch(x, batch.batch)
+        # 步骤 3：极速维度还原 
+        batch_size = agent_id.shape[0]
+        num_nodes = x.shape[0] // batch_size
+        x = x.view(batch_size, num_nodes, -1)
 
         if self.graph_aggr == "node":
-            return self.gatherNodeFeats(x, agent_id)  # 直接传入 agent_id
+            return self.gatherNodeFeats(x, agent_id)
         elif self.graph_aggr == "global":
             return self.graphAggr(x)
 
@@ -186,34 +190,23 @@ class SimplifiedAttentionNet(nn.Module):
 
     @staticmethod
     def process_adj(adj: Tensor, max_edge_dist: float) -> Tuple[Tensor, Tensor]:
-        """
-        Process adjacency matrix to filter far away nodes
-        and then obtain the edge_index and edge_weight
-        `adj` is of shape (batch_size, num_nodes, num_nodes)
-        OR (num_nodes, num_nodes)
-        """
         assert adj.dim() >= 2 and adj.dim() <= 3
         assert adj.size(-1) == adj.size(-2)
 
-        # filter far away nodes and connection to itself
-        connect_mask = ((adj < max_edge_dist) & (adj > 0)).float()
+        connect_mask = (adj > 0).float()
         adj = adj * connect_mask
+        
         if adj.dim() == 3:
-            # Case: (batch_size, num_nodes, num_nodes)
             batch_size, num_nodes, _ = adj.shape
             edge_index = adj.nonzero(as_tuple=False)
             edge_attr = adj[edge_index[:, 0], edge_index[:, 1], edge_index[:, 2]]
-            # Adjust indices for batched graph
             batch = edge_index[:, 0] * num_nodes
             edge_index = torch.stack([batch + edge_index[:, 1], batch + edge_index[:, 2]], dim=0)
         else:
-            # Case: (num_nodes, num_nodes)
             edge_index = adj.nonzero(as_tuple=False).t().contiguous()
             edge_attr = adj[edge_index[0], edge_index[1]]
 
-        # Ensure edge_attr is 2D
         edge_attr = edge_attr.unsqueeze(1) if edge_attr.dim() == 1 else edge_attr
-
         return edge_index, edge_attr
 
     def gatherNodeFeats(self, x: Tensor, idx: Tensor):
@@ -221,11 +214,11 @@ class SimplifiedAttentionNet(nn.Module):
         batch_size, num_nodes, num_feats = x.shape
         idx = idx.long()
         for i in range(idx.shape[1]):
-            idx_tmp = idx[:, i].unsqueeze(-1)  # (batch_size, 1)
-            idx_tmp = idx_tmp.repeat(1, num_feats).unsqueeze(1)  # (batch_size, 1, num_feats)
-            gathered_node = x.gather(1, idx_tmp).squeeze(1)  # (batch_size, num_feats)
+            idx_tmp = idx[:, i].unsqueeze(-1)
+            idx_tmp = idx_tmp.repeat(1, num_feats).unsqueeze(1)
+            gathered_node = x.gather(1, idx_tmp).squeeze(1)
             out.append(gathered_node)
-        return torch.cat(out, dim=1)  # (batch_size, num_feats*k)
+        return torch.cat(out, dim=1)
 
     def graphAggr(self, x: Tensor):
         if self.global_aggr_type == "mean":
@@ -237,49 +230,12 @@ class SimplifiedAttentionNet(nn.Module):
         else:
             raise ValueError(f"Invalid global_aggr_type: {self.global_aggr_type}")
 
-
 class GNNBase(nn.Module):
     """
         A Wrapper for constructing the Base graph neural network.
         This uses TransformerConv from Pytorch Geometric
         https://pytorch-geometric.readthedocs.io/en/latest/modules/nn.html#torch_geometric.nn.conv.TransformerConv
         and embedding layers for entity types
-        Params:
-        args: (argparse.Namespace)
-            Should contain the following arguments
-            num_embeddings: (int)
-                Number of entity types in the env to have different embeddings 
-                for each entity type
-            embedding_size: (int)
-                Embedding layer output size for each entity category
-            embed_hidden_size: (int)
-                Hidden layer dimension after the embedding layer
-            embed_layer_N: (int)
-                Number of hidden linear layers after the embedding layer")
-            embed_use_ReLU: (bool)
-                Whether to use ReLU in the linear layers after the embedding layer
-            embed_add_self_loop: (bool)
-                Whether to add self loops in adjacency matrix
-            gnn_hidden_size: (int)
-                Hidden layer dimension in the GNN
-            gnn_num_heads: (int)
-                Number of heads in the transformer conv layer (GNN)
-            gnn_concat_heads: (bool)
-                Whether to concatenate the head output or average
-            gnn_layer_N: (int)
-                Number of GNN conv layers
-            gnn_use_ReLU: (bool)
-                Whether to use ReLU in GNN conv layers
-            max_edge_dist: (float)
-                Maximum distance above which edges cannot be connected between 
-                the entities
-            graph_feat_type: (str)
-                Whether to use 'global' node/edge feats or 'relative'
-                choices=['global', 'relative']
-        node_obs_shape: (Union[Tuple, List])
-            The node observation shape. Example: (18,)
-        edge_dim: (int)
-            Dimensionality of edge attributes 
     """
     def __init__(self, args:argparse.Namespace, 
                 node_obs_shape:Union[List, Tuple],
@@ -306,23 +262,20 @@ class GNNBase(nn.Module):
                     embed_use_layerNorm=args.use_feature_normalization,
                     embed_add_self_loop=args.embed_add_self_loop,
                     max_edge_dist=args.max_edge_dist,
-                    num_heads=args.gnn_num_heads)
+                    num_heads=args.gnn_num_heads,
+                    concat_heads=args.gnn_concat_heads)
+        
         self.out_dim = args.gnn_hidden_size * (args.gnn_num_heads if args.gnn_concat_heads else 1)
         
     def forward(self, node_obs:Tensor, adj:Tensor, agent_id:Tensor):
         batch_size, num_nodes, _ = node_obs.shape
         edge_index, edge_attr = SimplifiedAttentionNet.process_adj(adj, self.gnn.max_edge_dist)
-        # print("Outer edge_index", edge_index.shape, "node_obs", node_obs.shape, "edge_attr", edge_attr.shape)
-        # Flatten node_obs
+        
         x = node_obs.view(-1, node_obs.size(-1))
-        # Create batch index
         batch = torch.arange(batch_size, device=node_obs.device).repeat_interleave(num_nodes)
-        # Create PyG Data object
+        
         data = Data(x=x, edge_index=edge_index, edge_attr=edge_attr, batch=batch)
     
-        # batch = Batch.from_data_list([Data(x=node_obs[i], edge_index=edge_index, edge_attr=edge_attr) 
-        # 						for i in range(node_obs.size(0))])
-        # 将 agent_id 直接传递给 SimplifiedAttentionNet
         x = self.gnn(data, agent_id)
 
         if self.gnn.graph_aggr == "node":

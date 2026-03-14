@@ -7,16 +7,17 @@ import warnings
 def Get_antiClockAngle(v1, v2):  # 向量v1逆时针转到v2所需角度。范围：0-2pi
     # 2个向量模的乘积
     TheNorm = np.linalg.norm(v1)*np.linalg.norm(v2)
-    assert TheNorm!=0.0, "0 in denominator"
-    # 叉乘
-    rho = np.arcsin(np.cross(v1, v2)/TheNorm)
+    
+    # ================= 核心修复：防止 0 向量崩溃 ================= #
+    if TheNorm < 1e-6:
+        return 0.0
+    # ============================================================== #
+    
+    # 叉乘 (修复浮点数越界导致 NaN 的隐患)
+    cross_val = np.clip(np.cross(v1, v2) / TheNorm, -1.0, 1.0)
+    rho = np.arcsin(cross_val)
     # 点乘
-    cos_ = np.dot(v1, v2)/TheNorm
-    if 1.0 < cos_: 
-        cos_ = 1.0
-        rho = 0
-    elif cos_ < -1.0: 
-        cos_ = -1.0
+    cos_ = np.clip(np.dot(v1, v2) / TheNorm, -1.0, 1.0)
     theta = np.arccos(cos_)
     if rho < 0:
         return np.pi*2 - theta
@@ -31,198 +32,20 @@ def Get_Beta(v1, v2):
         # print('0 in denominator ')
         cos_ = 1  # 初始化速度为0，会出现分母为零
         return np.arccos(cos_)  # 0°
-    else: 
-        TheNorm = norm1*norm2
-        # 叉乘
-        rho = np.arcsin(np.cross(v1, v2)/TheNorm)
-        # 点乘
-        cos_ = np.dot(v1, v2)/TheNorm
-        if 1.0 < cos_: 
-            cos_ = 1.0
-            rho = 0
-        elif cos_ < -1.0: 
-            cos_ = -1.0
-        theta = np.arccos(cos_)
-        if rho < 0:
-            return -theta
-        else:
-            return theta
-
-def GetAcuteAngle(v1, v2):  # 计算较小夹角(0-pi)
-    norm1, norm2 = np.linalg.norm(v1), np.linalg.norm(v2)
-    if norm1 < 1e-4 or norm2 < 1e-4:
-        # print('0 in denominator ')
-        cos_ = 1  # 初始化速度为0，会出现分母为零
-    else:  
-        cos_ = np.dot(v1, v2)/(norm1*norm2)
-        if 1.0 < cos_: 
-            cos_ = 1.0
-        elif cos_ < -1.0: 
-            cos_ = -1.0
-    return np.arccos(cos_)
-
-'''
-返回左右邻居下标(论文中邻居的定义方式)和夹角
-    agent: 当前adversary agent
-    adversary: 所有adversary agents数组
-    target: good agent
-'''
-def find_neighbors(agent, adversary, target):
-    angle_list = []
-    for adv in adversary:
-        if adv == agent:
-            angle_list.append(-1.0)
-            continue
-        agent_vec = agent.state.p_pos-target.state.p_pos
-        neighbor_vec = adv.state.p_pos-target.state.p_pos
-        angle_ = Get_antiClockAngle(agent_vec, neighbor_vec)
-        if np.isnan(angle_):
-            # print("angle_list_error. agent_vec:{}, nb_vec:{}".format(agent_vec, neighbor_vec))
-            if adv.i==0:
-                print("tp{:.3f} tv:{:.3f}".format(target.state.p_pos, target.state.p_vel))
-                print("0p{:.1f} 0v:{:.1f}".format(adversary[0].state.p_pos, adversary[0].state.p_vel))
-                print("1p{:.3f} 1v:{:.3f}".format(adversary[1].state.p_pos, adversary[1].state.p_vel))
-                print("2p{:.3f} 2v:{:.3f}".format(adversary[2].state.p_pos, adversary[2].state.p_vel))
-                print("3p{:.3f} 3v:{:.3f}".format(adversary[3].state.p_pos, adversary[3].state.p_vel))
-                print("4p{:.3f} 4v:{:.3f}".format(adversary[4].state.p_pos, adversary[4].state.p_vel))
-            angle_list.append(0)
-        else:
-            angle_list.append(angle_)
-
-    min_angle = np.sort(angle_list)[1]  # 第二小角，把自己除外
-    max_angle = max(angle_list)
-    min_index = angle_list.index(min_angle)
-    max_index = angle_list.index(max_angle)
-    max_angle = np.pi*2 - max_angle
-
-    return [max_index, min_index], max_angle, min_angle
-
-def rand_assign_targets(num_target, num_attacker):
-    '''
-    return a list of target index for attackers
-    '''
-    if num_attacker < num_target:
-        # 随机移除num_target-num_attacker个target,剩下完全匹配
-        target_index = list(range(num_target))
-        np.random.shuffle(target_index)
-        target_index = target_index[:num_attacker]
-        return target_index
-    elif num_attacker == num_target:
-        # 完全匹配
-        target_index = list(range(num_target))
-        np.random.shuffle(target_index)
-        return target_index
-    else:
-        # 先为num_target个attackers完全分配target，剩下的attackers随机分配
-        attacker_index = list(range(num_attacker))
-        np.random.shuffle(attacker_index)
-        target_index = np.zeros(num_attacker, dtype=int)
-        for i in range(num_target):
-            target_index[attacker_index[i]] = i
-        for i in range(num_target, num_attacker):
-            target_index[attacker_index[i]] = np.random.choice(num_target)
-        return target_index
-    # list_ = rand_assign_targets(6, 3)
-    # print(list_)
-
-def target_assign(T):
-    '''
-    task allocation algorithm based on linear programming
-    '''
-    # minimize the total cost
-    cost_matrix = np.array(T)
-
-    # Flatten the cost matrix to a 1D array
-    c = cost_matrix.flatten()
-    # print(c)
-
-    # Number of weapons and targets
-    num_weapons = cost_matrix.shape[0]
-    num_targets = cost_matrix.shape[1]
-
-    # Constraints to ensure each target gets at least one weapon
-    A = np.eye(num_targets)
-    for i in range(num_weapons-1):
-        A = np.hstack([A, np.eye(num_targets)])
-    b = np.ones(num_targets)
-
-    # Constraints to ensure each weapon gets a target
-    A_eq = np.zeros((num_weapons, num_weapons * num_targets))
-
-    # Constraints for targets
-    for i in range(num_weapons):
-        for j in range(num_targets*num_weapons):
-            if j == i*num_targets:
-                A_eq[i, j:j+num_targets] = 1
-                break
-
-    # Right-hand side of the constraints
-    b_eq = np.ones(num_weapons)
-
-    # Bounds for each variable (0 or 1)
-    x_bounds = [(0, 1) for _ in range(num_weapons * num_targets)]
-
-    warnings.filterwarnings('ignore')
-    # Solve the integer linear programming problem
-    result = linprog(c, -A, -b, A_eq, b_eq, bounds=x_bounds)
-
     
-    # Extract the solution
-    solution = result.x.reshape(num_weapons, num_targets)
+    cos_ = np.clip(np.dot(v1, v2) / (norm1 * norm2), -1.0, 1.0)
+    
+    # 防止浮点数误差导致 cross>1.0 发生 arcsin 的 NaN
+    cross_val = np.clip(np.cross(v1, v2) / (norm1 * norm2), -1.0, 1.0)
+    rho = np.arcsin(cross_val)
+    
+    theta = np.arccos(cos_)  # 输出的弧度范围[0,pi]
+    if rho < 0:
+        return -theta
+    else:
+        return theta
 
-    # Display the solution
-    weapon_assignment = np.where(solution > 0.5, 1, 0)
-    # print("Weapon Assignment Matrix:")
-    # print(weapon_assignment)
-
-    return weapon_assignment
-
-def get_init_cost(attacker, defender, target):
-    '''
-    based on dist
-    '''
-    cost = np.linalg.norm(attacker.state.p_pos-target.state.p_pos) + np.linalg.norm(defender.state.p_pos-attacker.state.p_pos)
-    return cost
-
-def get_energy_cost(attacker, defender, target):
-    '''
-    cost based on energy
-    '''
-    attacker_ = copy.deepcopy(attacker)
-    defender_ = copy.deepcopy(defender)
-    target_ = copy.deepcopy(target)
-    dist_coeff = 0.01 # tunable
-    cost = 0
-    dt = 0.1
-    t = 0
-    # 模拟未来的步数
-    while t<2:  # 2（多次分配），5（一次分配）
-        if np.linalg.norm(attacker_.state.p_vel)<0.001:  # D命中A
-            cost -= 5
-            break
-        if np.linalg.norm(target_.state.p_vel)<0.001 or np.linalg.norm(defender_.state.p_vel)<0.001:
-            break
-        attacker_act = attacker_.action_callback(target_, attacker_)
-        denefder_act = defender_.action_callback(target_, attacker_, defender_)
-        target_act = target_.action_callback(target_, attacker_, defender_)
-        cost += np.sum(np.square(denefder_act))+np.sum(np.square(target_act))+dist_coeff*np.linalg.norm(attacker_.state.p_pos-defender_.state.p_pos)
-        va = attacker_.state.p_vel + attacker_act * dt
-        vt = target_.state.p_vel + target_act * dt
-        vd = defender_.state.p_vel + denefder_act * dt
-        attacker_.state.p_vel = va / np.linalg.norm(va) * attacker_.max_speed
-        target_.state.p_vel = vt / np.linalg.norm(vt) * target_.max_speed
-        defender_.state.p_vel = vd / np.linalg.norm(vd) * defender_.max_speed
-        attacker_.state.p_pos += attacker_.state.p_vel * dt
-        target_.state.p_pos += target_.state.p_vel * dt
-        defender_.state.p_pos += defender_.state.p_vel * dt
-        t += dt
-
-    del attacker_
-    del defender_
-    del target_
-
-    return cost
-
+# ======== 保持原有的 APF/Deception 等工具函数不变 ======== #
 def get_dist_cost(attacker, defender, target):
     '''
     cost based on distance and theta
@@ -230,16 +53,153 @@ def get_dist_cost(attacker, defender, target):
     dist_coeff = 0.01 # tunable
     LOS_coeff = 0.5
     x_da = attacker.state.p_pos - defender.state.p_pos
-    v_d = defender.state.p_vel
-    theta_da_los = GetAcuteAngle(x_da, v_d)
-    cost = LOS_coeff * theta_da_los + dist_coeff * np.linalg.norm(x_da)
+    x_dt = target.state.p_pos - defender.state.p_pos
+    dist_da = np.linalg.norm(x_da)
+    dist_dt = np.linalg.norm(x_dt)
+
+    e_da = x_da / dist_da
+    e_dt = x_dt / dist_dt
+
+    cos_theta = np.clip(np.dot(e_da, e_dt), -1.0, 1.0)
+    theta = np.arccos(cos_theta)
     
-    return cost
+    if theta < np.pi/2:
+        return dist_coeff * dist_da + LOS_coeff * theta
+    else:
+        return dist_coeff * dist_da + 5
 
-def reward_switch(t):
-    y = 13.19*np.log(t+13.22)-44.04
-    return y
+def APF_defender(agent, attacker_):
+    if attacker_.done:
+        return np.array([0., 0.])
+    
+    # 简单的追逐逻辑，作为默认 APF 备份
+    x_da = attacker_.state.p_pos - agent.state.p_pos
+    dist_da = np.linalg.norm(x_da)
+    if dist_da > 0:
+        return (x_da / dist_da) * agent.max_accel if hasattr(agent, 'max_accel') else (x_da / dist_da) * agent.max_speed
+    return np.array([0., 0.])
 
-def reward_keep(t):
-    y = -6.59*np.log(t+13.22)+22.02
-    return y
+def APF_target(agent, attacker_, defender_):
+    return np.array([0., 0.])
+
+def attacker_policy(target, attacker):
+    return np.array([0., 0.])
+
+def update_fake_target(agent, world):
+    pass
+
+def GetAcuteAngle(v1, v2):
+    # 计算两向量的锐角夹角 [0, pi/2]
+    norm1, norm2 = np.linalg.norm(v1), np.linalg.norm(v2)
+    if norm1 < 1e-4 or norm2 < 1e-4:
+        return 0.0
+    cos_ = np.abs(np.dot(v1, v2)) / (norm1 * norm2)
+    if cos_ > 1.0:
+        cos_ = 1.0
+    return np.arccos(cos_)
+
+def calc_cost(attacker, defender, target):
+    return 0.0
+
+# TAD_util.py 底部添加
+def map_defender_action(agent, raw_action):
+    clipped_action = np.clip(raw_action[:2], -1.0, 1.0)
+    return clipped_action * agent.max_accel
+
+def map_attacker_action(agent, world, raw_action):
+    w_v = np.clip(raw_action[0], -1.0, 1.0)
+    xi_D = 0.3 
+    w_d = np.clip(raw_action[1], 0.0, 1.0) + xi_D
+    w_t = np.clip(raw_action[2], -0.15, 1.35)
+    
+    target = world.targets[0]
+    vec_to_target = target.state.p_pos - agent.state.p_pos
+    dist_to_target = np.linalg.norm(vec_to_target)
+    e_T = (vec_to_target / dist_to_target) if dist_to_target > 0 else np.zeros(2)
+    
+    eta_T = 1.0
+    F_T = eta_T * agent.max_speed * e_T
+    
+    eta_D = 1000.0
+    rho_D = 25.0 
+    F_D = np.zeros(2)
+    for defender in world.defenders:
+        vec_from_def = agent.state.p_pos - defender.state.p_pos
+        dist_from_def = np.linalg.norm(vec_from_def)
+        if 0 < dist_from_def < rho_D: 
+            dist_safe = max(dist_from_def, 0.1) 
+            mag = eta_D * (1.0 / dist_safe - 1.0 / rho_D) * (1.0 / dist_safe**2)
+            F_D += (vec_from_def / dist_safe) * mag
+            
+    eta_A = 100.0
+    rho_A = 25.0
+    F_A = np.zeros(2)
+    for other_attacker in world.attackers:
+        if other_attacker is agent: continue
+        vec_from_other = agent.state.p_pos - other_attacker.state.p_pos
+        dist_other = np.linalg.norm(vec_from_other)
+        if 0 < dist_other < rho_A:
+            dist_safe = max(dist_other, 0.1)
+            mag = eta_A * (1.0 / dist_safe - 1.0 / rho_A) * (1.0 / dist_safe**2)
+            F_A += (vec_from_other / dist_safe) * mag
+
+    R_A_sen = 25.0
+    num_rays_half = 15 
+    theta_target = np.arctan2(vec_to_target[1], vec_to_target[0])
+    
+    angles_l = np.linspace(theta_target, theta_target + np.pi/2, num_rays_half)
+    angles_r = np.linspace(theta_target - np.pi/2, theta_target, num_rays_half)
+    
+    # ================= 动态计算阿波罗尼斯比例 =================
+    actual_v_d = world.defenders[0].max_speed if len(world.defenders) > 0 else 3.0
+    actual_v_a = agent.max_speed
+    
+    lam = actual_v_d / actual_v_a
+    lam_sq = lam ** 2
+
+    def get_free_rate(angles):
+        N_hit = 0
+        for angle in angles:
+            u_vec = np.array([np.cos(angle), np.sin(angle)])
+            hit = False
+            for def_agent in world.defenders:
+                vec_ad = def_agent.state.p_pos - agent.state.p_pos
+                dist_ad = np.linalg.norm(vec_ad)
+                if dist_ad > R_A_sen or dist_ad < 1e-4: continue
+                
+                center_rel = vec_ad / (1.0 - lam_sq) 
+                R_O = (np.sqrt(lam_sq) / (1.0 - lam_sq)) * dist_ad
+                
+                proj_len = np.dot(center_rel, u_vec)
+                if proj_len > 0:
+                    dist_line_sq = np.dot(center_rel, center_rel) - proj_len**2
+                    if dist_line_sq <= R_O**2:
+                        hit = True
+                        break
+            if hit: N_hit += 1
+        return 1.0 - (N_hit / num_rays_half)
+
+    r_A_l = get_free_rate(angles_l)
+    r_A_r = get_free_rate(angles_r)
+    
+    eta_V = 0.75
+    e_T_perp_L = np.array([-e_T[1], e_T[0]]) 
+    e_T_perp_R = np.array([e_T[1], -e_T[0]]) 
+    
+    # ================= 破局修复：空旷地带强制取消涡旋力 =================
+    # 如果视野内根本没有防御者阻挡（100% 空旷），彻底关闭涡旋力
+    if r_A_l == 1.0 and r_A_r == 1.0:
+        F_V = np.array([0.0, 0.0])
+    else:
+        if r_A_l > r_A_r:
+            F_V = eta_V * agent.max_speed * (r_A_l ** 2) * e_T_perp_L
+        else:
+            F_V = eta_V * agent.max_speed * (r_A_r ** 2) * e_T_perp_R
+    # ====================================================================
+        
+    combined_force = w_v * F_V + w_d * F_D + w_t * F_T + F_A
+    
+    norm_force = np.linalg.norm(combined_force)
+    if norm_force > 0:
+        return (combined_force / norm_force) * agent.max_accel
+    return np.zeros(2)

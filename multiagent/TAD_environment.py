@@ -7,9 +7,10 @@ from .multi_discrete import MultiDiscrete
 from multiagent.TAD_core import Agent
 from onpolicy import global_var as glv
 from multiagent.TAD_util import GetAcuteAngle
+from multiagent.TAD_util import map_attacker_action, map_defender_action
 
 # update bounds to center around agent
-cam_range = 8
+cam_range = 150
 INFO = []  # render时可视化数据用
 
 # environment for all agents in the multiagent world
@@ -20,17 +21,16 @@ class MultiAgentEnv(gym.Env):
     }
 
     def __init__(self, world, reset_callback=None, reward_callback=None,
-                 observation_callback=None, info_callback=None,  # 以上callback是通过MPE_env跑通的
+                 observation_callback=None, info_callback=None,
                  done_callback=None, update_belief=None, 
-                 post_step_callback=None,shared_viewer=True, 
+                 post_step_callback=None, shared_viewer=True, 
                  discrete_action=False):
-        # discrete_action为false,即指定动作为Box类型
-
+        
         # set CL
         self.use_policy = 1
         self.use_CL = 0
         self.CL_ratio = 0
-        self.Cp = 0.6  # 1.0 # 0.3
+        self.Cp = 0.6  
         self.JS_thre = 0
 
         # terminate
@@ -39,9 +39,15 @@ class MultiAgentEnv(gym.Env):
         self.world = world
         self.world_length = self.world.world_length
         self.current_step = 0
-        self.agents = self.world.attackers
-        # set required vectorized gym env property
-        self.n = len(self.world.attackers)
+        
+        # 自动识别强化学习策略智能体：支持在 attacker 和 defender 之间切换
+        self.train_mode = getattr(self.world, 'train_mode', 'attacker')
+        if self.train_mode == 'attacker':
+            self.agents = self.world.attackers
+        else:
+            self.agents = self.world.defenders
+        self.n = len(self.agents)
+        
         # scenario callbacks
         self.reset_callback = reset_callback
         self.reward_callback = reward_callback
@@ -51,22 +57,10 @@ class MultiAgentEnv(gym.Env):
         self.post_step_callback = post_step_callback
         self.update_belief = update_belief
 
-        # environment parameters
-        # self.discrete_action_space = True
         self.discrete_action_space = discrete_action
-
-        # if true, action is a number 0...N, otherwise action is a one-hot N-dimensional vector
         self.discrete_action_input = False
-
-        # if true, even the action is continuous, action will be performed discretely
-        self.force_discrete_action = world.discrete_action if hasattr(
-            world, 'discrete_action') else False
-        # in this env, force_discrete_action == False because world do not have discrete_action
-
-        # if true, every agent has the same reward
-        self.shared_reward = world.collaborative if hasattr(
-            world, 'collaborative') else False
-        #self.shared_reward = False
+        self.force_discrete_action = world.discrete_action if hasattr(world, 'discrete_action') else False
+        self.shared_reward = world.collaborative if hasattr(world, 'collaborative') else False
         self.time = 0
 
         # configure spaces
@@ -74,18 +68,28 @@ class MultiAgentEnv(gym.Env):
         self.observation_space = []
         self.share_observation_space = []
         share_obs_dim = 0
+        
         for agent in self.agents:
-            # action space
-            total_action = [[0, len(self.world.targets)-1], [0,1]]
-            u_action_space = MultiDiscrete(total_action)
+            # 直接使用 Box 连续空间控制物理运动
+            if self.discrete_action_space:
+                u_action_space = spaces.Discrete(self.world.dim_p * 2 + 1)
+            else:
+                u_action_space = spaces.Box(low=-1.0, high=+1.0, shape=(self.world.dim_p,), dtype=np.float32)
             self.action_space.append(u_action_space)
             
             # observation space
-            obs_dim = len(observation_callback(agent, self.world))  # callback from senario, changeable
-            share_obs_dim += obs_dim  # simple concatenate
-            self.observation_space.append(spaces.Box(
-                low=-np.inf, high=+np.inf, shape=(obs_dim,), dtype=np.float32))  # [-inf,inf]
-        
+            obs_dim = len(observation_callback(agent, self.world)) 
+            share_obs_dim += obs_dim  
+            self.observation_space.append(spaces.Box(low=-np.inf, high=+np.inf, shape=(obs_dim,), dtype=np.float32))
+
+        for i, agent in enumerate(self.agents):
+            if 'attacker' in agent.name and getattr(self.world, 'train_mode', 'attacker') == 'attacker':
+                # 【核心修复】：赋予攻击者左躲右闪的完整动力学边界
+                # 严格对齐论文: w_v[-1, 1], w_d[0, 1], w_t[-0.15, 1.35]
+                low_bound = np.array([-1.0, 0.0, -0.15], dtype=np.float32)
+                high_bound = np.array([1.0, 1.0, 1.35], dtype=np.float32)
+                self.action_space[i] = spaces.Box(low=low_bound, high=high_bound, shape=(3,), dtype=np.float32)
+
         self.share_observation_space = [spaces.Box(
             low=-np.inf, high=+np.inf, shape=(share_obs_dim,), dtype=np.float32) for _ in range(self.n)]
         
@@ -103,28 +107,28 @@ class MultiAgentEnv(gym.Env):
         else:
             np.random.seed(seed)
 
-    # step  this is  env.step()
-    def step(self, action_n):  # action_n: action for all policy agents, concatenated, from MPErunner
+    def step(self, action_n):
         self.current_step += 1
         obs_n = []
-        reward_n = []  # concatenated reward for each agent
+        reward_n = []
         done_n = []
         info_n = []
         start_ratio = 0.80
         self.JS_thre = int(self.world_length*start_ratio*set_JS_curriculum(self.CL_ratio/self.Cp))
 
         # set action for poliy agents
-        for i, agent in enumerate(self.agents):  # attacker
+        for i, agent in enumerate(self.agents):
             self._set_action(action_n[i], agent, self.action_space[i])
         
-        # print('attacker0 act:',action_n[2])
-        # print('attacker0 belief:',self.agents[2].fake_target)
-
         # advance world state
-        self.world.step()  # core.step(), after done, all stop. 不能传参
+        self.world.step()
 
         # record observation for each agent
         for i, agent in enumerate(self.agents):
+            if agent.done:
+                # 死亡后强制零动作，避免残余隐状态干扰物理
+                agent.action.u = np.zeros(self.world.dim_p)
+                
             obs_n.append(self._get_obs(agent))
             reward_n.append([self._get_reward(agent)])
             done_n.append(self._get_done(agent))
@@ -134,387 +138,210 @@ class MultiAgentEnv(gym.Env):
                 info['fail'] = env_info['fail']
             info_n.append(info)
 
-        # all agents get total reward in cooperative case, if shared reward, all agents have the same reward, and reward is sum
         reward = np.sum(reward_n)
         if self.shared_reward:
-            reward_n = [[reward]] * self.n  # [[reward] [reward] [reward] ...]
+            reward_n = [[reward]] * self.n
 
         if self.post_step_callback is not None:
             self.post_step_callback(self.world)
 
-        # supervise dones number and belief update
         terminate = []
         current_dead = 0
         attacker_belief = []
-        for i, agent in enumerate(self.world.agents):
-            if agent.name=='target':
+        
+        terminate = []
+        for agent in self.world.agents:
+            # 修复 1：你的 target 名字叫 'target 0'，所以必须用 'in' 来匹配
+            if 'target' in agent.name:
                 terminate.append(agent.done)
             if agent.name=='attacker':
-                attacker_belief.append(agent.fake_target)
-                agent.last_belief = agent.fake_target
-                agent.last_lock = agent.is_locked
-                # print('agent {}, is locked:{}'.format(agent.id, agent.is_locked))
+                # 兼容旧代码，防止报错
+                belief = getattr(agent, 'fake_target', -1)
+                attacker_belief.append(belief)
+                agent.last_belief = belief
+                agent.last_lock = getattr(agent, 'is_locked', False)
                 
             if agent.done:
                 current_dead += 1
 
-        # print('step:',self.current_step)
-        self.is_ternimate = True if all(terminate) else False
+        # 修复 2：只有在真正找到 target 的情况下，才去判断是否全灭
+        if len(terminate) > 0:
+            self.is_ternimate = True if all(terminate) else False
+        else:
+            self.is_ternimate = False
+            
         if self.is_ternimate:
-            # 所有target都被kill
             done_n = [True] * self.n
             
-        # '''
-        # only assign once for each target
-        # re-assign goals for TADs
-        if self.update_belief is not None and not all(done_n):  # 若全部targets or attackers都被kill，则不需要更新
-            # self.current_step%10==0
-            # not self.world.attacker_belief == attacker_belief or # change in attacker belief
+        if self.update_belief is not None and not all(done_n):
             if (self.current_step%15==0 and self.current_step < 180) or current_dead > self.world.cnt_dead:
-                # if there is change in attacker belief or some agent is killed
                 self.update_belief(self.world)
-                # print("update belief")
-        # '''
 
         self.world.cnt_dead = current_dead
         self.world.attacker_belief = attacker_belief
-
-        # print('current_step:',self.current_step)
-        # print('world step:',self.world.world_step)
 
         return obs_n, reward_n, done_n, info_n
 
     def reset(self):
         self.current_step = 0
-        # reset world
         self.reset_callback(self.world)
-        # reset renderer
         self._reset_render()
-        # record observations for each agent
+        
         obs_n = []
-        self.agents = self.world.attackers
+        # 同步更新 agents
+        if getattr(self.world, 'train_mode', 'attacker') == 'attacker':
+            self.agents = self.world.attackers
+        else:
+            self.agents = self.world.defenders
 
         for agent in self.agents:
             obs_n.append(self._get_obs(agent))
 
         return obs_n
 
-    # get info used for benchmarking
     def _get_info(self, agent):
         if self.info_callback is None:
             return {}
         return self.info_callback(agent, self.world)
 
-    # get observation for a particular agent
     def _get_obs(self, agent):
         if self.observation_callback is None:
             return np.zeros(0)
         return self.observation_callback(agent, self.world)
 
-    # get dones for a particular agent, means it is dead
-    # if all agents are done, then the episode is done before episode length is reached. in envwrapper
     def _get_done(self, agent):
         if self.done_callback is None:
-            if self.current_step >= self.world_length:
-                return True
-            else:
-                return False
+            # 没有外部 done 回调时，同时考虑物理标记的 agent.done，避免终止状态继续积累梯度与隐藏态
+            return agent.done or (self.current_step >= self.world_length)
         return self.done_callback(agent, self.world)
-        # if self.current_step >= self.world_length:
-        #     return True
-        # else:
-        #     return False
 
-    # get reward for a particular agent
     def _get_reward(self, agent):
         if self.reward_callback is None:
             return 0.0
         return self.reward_callback(agent, self.world)
 
-    # set env action for a particular agent
-    def _set_action(self, action, agent, action_space, time=None):
-        # pass
-        # process action
-        if isinstance(action_space, MultiDiscrete):
-            attacker_belief = int(action[0])
-            is_locked = int(action[1])
-            agent.belief_act = attacker_belief
-            agent.lock_act = is_locked
-            
-            # if not agent.is_locked:
-            #     if is_locked:
-            #         agent.fake_target = agent.true_target
-            #         agent.is_locked = True
-            #     else:
-            #         agent.fake_target = attacker_belief
-            # else:
-            #     if is_locked:
-            #         agent.fake_target = agent.true_target
-            #     else:
-            #         # Allow relocking decisions to be reversible during rollout.
-            #         agent.is_locked = False
-            #         agent.fake_target = attacker_belief
 
-            if not agent.is_locked:
-                if is_locked:
-                    agent.fake_target = agent.true_target
-                    agent.is_locked = True
-                else:
-                    agent.fake_target = attacker_belief
-            else:
-                agent.fake_target = agent.true_target
-            '''
-            if not agent.is_locked:
-                agent.fake_target = attacker_belief
-                agent.true_target = attacker_belief
-                if is_locked:
-                    agent.is_locked = True
-            else:
-                agent.fake_target = agent.true_target
-            '''
+    def _set_action(self, action, agent, action_space):
+        # 1. 基础清零
+        agent.action.u = np.zeros(self.world.dim_p)
+        agent.action.c = np.zeros(self.world.dim_c)
+
+        # 2. 【核心修复】：防止“诈尸”！如果智能体已阵亡或出界，直接返回，忽略神经网络的输出
+        if getattr(agent, 'done', False):
+            return 
+
+        # 3. 解析网络动作
+        action_args = action[0] if isinstance(action, list) else action
+
+        # 4. 【更清晰的写法】：直接根据 agent 的身份调用统一映射器
+        if 'attacker' in agent.name:
+            # 无论是主角在训练，还是未来扩展，只要它是攻击者，就用这套物理法则
+            agent.action.u = map_attacker_action(agent, self.world, action_args)
+            
+        elif 'defender' in agent.name:
+            # 只要它是防守者，就用这套物理法则
+            agent.action.u = map_defender_action(agent, action_args)
+
 
     def _set_CL(self, CL_ratio):
-        # 通过多进程set value，与env_wraapper直接关联，不能改。
-        # 此处glv是这个进程中的！与mperunner中的并不共用。
         glv.set_value('CL_ratio', CL_ratio)
         self.CL_ratio = glv.get_value('CL_ratio')
+        # 同步写回 world，确保 reset_world 能读取到最新的课程比率
+        if hasattr(self, 'world'):
+            self.world.CL_ratio = self.CL_ratio
 
-    # reset rendering assets
     def _reset_render(self):
         self.render_geoms = None
         self.render_geoms_xform = None
 
     def render(self, mode='human', close=False):
         if close:
-            # close any existic renderers
             for i, viewer in enumerate(self.viewers):
                 if viewer is not None:
                     viewer.close()
                 self.viewers[i] = None
             return []
         if mode == 'human':
-            alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'
-            message = ''
-            for agent in self.world.agents:
-                comm = []
-                for other in self.world.agents:
-                    if other is agent:
-                        continue
-                    if np.all(other.state.c == 0):
-                        word = '_'
-                    else:
-                        word = alphabet[np.argmax(other.state.c)]
-                    message += (other.name + ' to ' +
-                                agent.name + ': ' + word + '   ')
-            # print(message)
+            pass
+            
         for i in range(len(self.viewers)):
-            # create viewers (if necessary)
             if self.viewers[i] is None:
-                # import rendering only if we need it (and don't import for headless machines)
-                #from gym.envs.classic_control import rendering
                 from . import rendering
                 self.viewers[i] = rendering.Viewer(700, 700)
-        # create rendering geometry
+                
         if self.render_geoms is None:
-            # import rendering only if we need it (and don't import for headless machines)
-            #from gym.envs.classic_control import rendering
             from . import rendering
             self.render_geoms = []
             self.render_geoms_xform = []
             self.line = {}
             self.comm_geoms = []
             for entity in self.world.entities:
-                geom = rendering.make_circle(0.1)  # entity.size
+                # ================= 核心修复 1：使用真实的 entity.size ================= #
+                geom = rendering.make_circle(entity.size)
+                # ==================================================================== #
                 xform = rendering.Transform()
-
                 entity_comm_geoms = []
-                if 'agent' in entity.name:
-                    geom.set_color(*entity.color, alpha=0.5)
-
-                    if not entity.silent:
-                        dim_c = self.world.dim_c  # 0
-                        # make circles to represent communication
-                        for ci in range(dim_c):
-                            comm = rendering.make_circle(entity.size / dim_c)
-                            comm.set_color(1, 1, 1)
-                            comm.add_attr(xform)
-                            offset = rendering.Transform()
-                            comm_size = (entity.size / dim_c)
-                            offset.set_translation(ci * comm_size * 2 -
-                                                   entity.size + comm_size, 0)
-                            comm.add_attr(offset)
-                            entity_comm_geoms.append(comm)
-
+                
+                # 区分背景区域（半透明）和智能体实体（不透明）
+                if 'target' in entity.name or 'attacker' in entity.name or 'defender' in entity.name:
+                    geom.set_color(*entity.color, alpha=1.0)
                 else:
-                    geom.set_color(*entity.color)
-                    if entity.channel is not None:
-                        dim_c = self.world.dim_c
-                        # make circles to represent communication
-                        for ci in range(dim_c):
-                            comm = rendering.make_circle(entity.size / dim_c)
-                            comm.set_color(1, 1, 1)
-                            comm.add_attr(xform)
-                            offset = rendering.Transform()
-                            comm_size = (entity.size / dim_c)
-                            offset.set_translation(ci * comm_size * 2 -
-                                                   entity.size + comm_size, 0)
-                            comm.add_attr(offset)
-                            entity_comm_geoms.append(comm)
+                    geom.set_color(*entity.color, alpha=0.35) # 背景光环高透明度
+                    
                 geom.add_attr(xform)
                 self.render_geoms.append(geom)
                 self.render_geoms_xform.append(xform)
                 self.comm_geoms.append(entity_comm_geoms)
             
-            for wall in self.world.walls:
-                corners = ((wall.axis_pos - 0.5 * wall.width, wall.endpoints[0]),
-                           (wall.axis_pos - 0.5 *
-                            wall.width, wall.endpoints[1]),
-                           (wall.axis_pos + 0.5 *
-                            wall.width, wall.endpoints[1]),
-                           (wall.axis_pos + 0.5 * wall.width, wall.endpoints[0]))
-                if wall.orient == 'H':
-                    corners = tuple(c[::-1] for c in corners)
-                geom = rendering.make_polygon(corners)
-                if wall.hard:
-                    geom.set_color(*wall.color)
-                else:
-                    geom.set_color(*wall.color, alpha=0.5)
-                self.render_geoms.append(geom)
-
-            # add geoms to viewer
-            # for viewer in self.viewers:
-            #     viewer.geoms = []
-            #     for geom in self.render_geoms:
-            #         viewer.add_geom(geom)
+            for wall in getattr(self.world, 'walls', []):
+                pass 
+                
             for viewer in self.viewers:
                 viewer.geoms = []
                 for geom in self.render_geoms:
                     viewer.add_geom(geom)
-                for entity_comm_geoms in self.comm_geoms:
-                    for geom in entity_comm_geoms:
-                        viewer.add_geom(geom)
+                    
         results = []
         for i in range(len(self.viewers)):
-            from . import rendering
-
             if self.shared_viewer:
                 pos = np.zeros(self.world.dim_p)
             else:
                 pos = self.agents[i].state.p_pos
-            self.viewers[i].set_bounds(
-                -5, 30, -15, 15)
-            # x_left, x_right, y_bottom, y_top
+            self.viewers[i].set_bounds(-120, 120, -120, 120)
             
-            
-            ############################### csv save
+            # csv save logging
             data_ = ()
-            # for j in range(len(self.world.agents)):
-            #     data_ = data_ + (j, self.world.agents[j].state.p_pos[0], self.world.agents[j].state.p_pos[1])
-            # data_ = data_ + (self.q_md, self.q_md_dot)
             for j, attacker in enumerate(self.world.attackers):
+                # 增加 getattr 兼容，防止没有分层欺骗变量时报错
                 data_ = data_ + (j, attacker.state.p_pos[0], attacker.state.p_pos[1],
                                  attacker.state.p_vel[0], attacker.state.p_vel[1],
-                                 attacker.true_target, attacker.fake_target, attacker.is_locked, attacker.done)
+                                 getattr(attacker, 'true_target', -1), getattr(attacker, 'fake_target', -1), getattr(attacker, 'is_locked', False), attacker.done)
             for j, target in enumerate(self.world.targets):
                 data_ = data_ + (j, target.state.p_pos[0], target.state.p_pos[1],
                                  target.state.p_vel[0], target.state.p_vel[1], target.done)
             for j, defender in enumerate(self.world.defenders):
                 data_ = data_ + (j, defender.state.p_pos[0], defender.state.p_pos[1],
-                                 defender.state.p_vel[0], defender.state.p_vel[1], defender.attacker, defender.done)
+                                 defender.state.p_vel[0], defender.state.p_vel[1], getattr(defender, 'attacker', -1), defender.done)
             INFO.append(data_)
-            # #csv
-            
 
-            # update geometry positions
             for e, entity in enumerate(self.world.entities):
                 self.render_geoms_xform[e].set_translation(*entity.state.p_pos)
-                # 绘制agent速度
                 self.line[e] = self.viewers[i].draw_line(entity.state.p_pos, entity.state.p_pos+entity.state.p_vel*1.0)
-
-                # if entity.name == 'attacker' and not entity.done:
-                #     self.line[e] = self.viewers[i].draw_line(entity.state.p_pos, self.world.targets[entity.fake_target].state.p_pos)
-
-                if 'agent' in entity.name:
-                    self.render_geoms[e].set_color(*entity.color, alpha=0.5)
-                    self.line[e].set_color(*entity.color, alpha=0.5)
-
-                    if not entity.silent:
-                        for ci in range(self.world.dim_c):
-                            color = 1 - entity.state.c[ci]
-                            self.comm_geoms[e][ci].set_color(
-                                color, color, color)
+                
+                # ================= 核心修复 2：逐帧维持正确的透明度 ================= #
+                if 'target' in entity.name or 'attacker' in entity.name or 'defender' in entity.name:
+                    self.render_geoms[e].set_color(*entity.color, alpha=1.0)
+                    self.line[e].set_color(*entity.color, alpha=1.0)
                 else:
-                    self.render_geoms[e].set_color(*entity.color)
-                    if entity.channel is not None:
-                        for ci in range(self.world.dim_c):
-                            color = 1 - entity.channel[ci]
-                            self.comm_geoms[e][ci].set_color(
-                                color, color, color)
-            
-            m = len(self.line)
-            for k, attacker in enumerate(self.world.attackers):
-                if not attacker.done:
-                    self.line[m+k] = self.viewers[i].draw_line(attacker.state.p_pos, self.world.targets[attacker.true_target].state.p_pos)
-                    self.line[m+k].set_color(*np.array([0.45, 0.95, 0.45]), alpha=0.5)  # green
+                    self.render_geoms[e].set_color(*entity.color, alpha=0.35)
+                    self.line[e].set_color(*entity.color, alpha=0.0) # 背景圈不需要速度线
+                # ================================================================== #
 
-            m = len(self.line)
-            for k, attacker in enumerate(self.world.attackers):
-                if not attacker.done:
-                    self.line[m+k] = self.viewers[i].draw_line(attacker.state.p_pos, self.world.targets[attacker.fake_target].state.p_pos)
-                    self.line[m+k].set_color(*attacker.color, alpha=0.5)  # red
-
-            m = len(self.line)
-            for k, defender in enumerate(self.world.defenders):
-                if not defender.done:
-                    self.line[m+k] = self.viewers[i].draw_line(defender.state.p_pos, self.world.attackers[defender.attacker].state.p_pos)
-                    self.line[m+k].set_color(*defender.color, alpha=0.5)
-
-            # render to display or array
-            results.append(self.viewers[i].render(
-                return_rgb_array=mode == 'rgb_array'))
+            results.append(self.viewers[i].render(return_rgb_array=mode == 'rgb_array'))
 
         return results
 
-    # create receptor field locations in local coordinate frame
-    def _make_receptor_locations(self, agent):
-        receptor_type = 'polar'
-        range_min = 0.05 * 2.0
-        range_max = 1.00
-        dx = []
-        # circular receptive field
-        if receptor_type == 'polar':
-            for angle in np.linspace(-np.pi, +np.pi, 8, endpoint=False):
-                for distance in np.linspace(range_min, range_max, 3):
-                    dx.append(
-                        distance * np.array([np.cos(angle), np.sin(angle)]))
-            # add origin
-            dx.append(np.array([0.0, 0.0]))
-        # grid receptive field
-        if receptor_type == 'grid':
-            for x in np.linspace(-range_max, +range_max, 5):
-                for y in np.linspace(-range_max, +range_max, 5):
-                    dx.append(np.array([x, y]))
-        return dx
-
-def limit_action_inf_norm(action, max_limit):
-    action = np.float32(action)
-    action_ = action
-    if abs(action[0]) > abs(action[1]):
-        if abs(action[0])>max_limit:
-            action_[1] = max_limit*action[1]/abs(action[0])
-            action_[0] = max_limit if action[0] > 0 else -max_limit
-        else:
-            pass
-    else:
-        if abs(action[1])>max_limit:
-            action_[0] = max_limit*action[0]/abs(action[1])
-            action_[1] = max_limit if action[1] > 0 else -max_limit
-        else:
-            pass
-    return action_
-
 def set_JS_curriculum(CL_ratio):
-    # func_ = 1-CL_ratio
     k = 2.0
     delta = 1-(np.exp(-k*(-1))-np.exp(k*(-1)))/(np.exp(-k*(-1))+np.exp(k*(-1)))
     x = 2*CL_ratio-1
@@ -542,16 +369,8 @@ class MultiAgentGraphEnv(MultiAgentEnv):
         discrete_action=False,
     ) -> None:
         super(MultiAgentGraphEnv, self).__init__(
-            world,
-            reset_callback,
-            reward_callback,
-            observation_callback,
-            info_callback,
-            done_callback,
-            update_belief,
-            post_step_callback,
-            shared_viewer,
-            discrete_action,
+            world, reset_callback, reward_callback, observation_callback, info_callback,
+            done_callback, update_belief, post_step_callback, shared_viewer, discrete_action,
         )
         self.update_graph = update_graph
         self.graph_observation_callback = graph_observation_callback
@@ -572,31 +391,21 @@ class MultiAgentGraphEnv(MultiAgentEnv):
             edge_dim = 1  
             agent_id_dim = 1  
             
-            self.node_observation_space.append(
-                spaces.Box(low=-np.inf, high=+np.inf, shape=node_obs_dim, dtype=np.float32)
-            )
-            self.adj_observation_space.append(
-                spaces.Box(low=-np.inf, high=+np.inf, shape=adj_dim, dtype=np.float32)
-            )
-            self.edge_observation_space.append(
-                spaces.Box(low=-np.inf, high=+np.inf, shape=(edge_dim,), dtype=np.float32)
-            )
-            self.agent_id_observation_space.append(
-                spaces.Box(low=-np.inf, high=+np.inf, shape=(agent_id_dim,), dtype=np.float32)
-            )
-            self.share_agent_id_observation_space.append(
-                spaces.Box(low=-np.inf, high=+np.inf, shape=(num_agents * agent_id_dim,), dtype=np.float32)
-            )
+            self.node_observation_space.append(spaces.Box(low=-np.inf, high=+np.inf, shape=node_obs_dim, dtype=np.float32))
+            self.adj_observation_space.append(spaces.Box(low=-np.inf, high=+np.inf, shape=adj_dim, dtype=np.float32))
+            self.edge_observation_space.append(spaces.Box(low=-np.inf, high=+np.inf, shape=(edge_dim,), dtype=np.float32))
+            self.agent_id_observation_space.append(spaces.Box(low=-np.inf, high=+np.inf, shape=(agent_id_dim,), dtype=np.float32))
+            self.share_agent_id_observation_space.append(spaces.Box(low=-np.inf, high=+np.inf, shape=(num_agents * agent_id_dim,), dtype=np.float32))
 
     def step(self, action_n):
         if self.update_graph is not None:
             self.update_graph(self.world)
         self.current_step += 1
+        # ================= 核心修复：将环境的时间步同步给物理世界 =================
+        self.world.current_step = self.current_step
+
         obs_n, reward_n, done_n, info_n = [], [], [], []
         node_obs_n, adj_n, agent_id_n = [], [], []
-        
-        start_ratio = 0.80
-        self.JS_thre = int(self.world_length * start_ratio * set_JS_curriculum(self.CL_ratio / self.Cp))
 
         for i, agent in enumerate(self.agents):
             self._set_action(action_n[i], agent, self.action_space[i])
@@ -605,6 +414,9 @@ class MultiAgentGraphEnv(MultiAgentEnv):
 
         done_check = []
         for i, agent in enumerate(self.agents):
+            if agent.done:
+                agent.action.u = np.zeros(self.world.dim_p)
+                
             obs_n.append(self._get_obs(agent))
             agent_id_n.append(self._get_id(agent))
             
@@ -620,51 +432,42 @@ class MultiAgentGraphEnv(MultiAgentEnv):
             done_check.append(agent.done)
             
             info = {'individual_reward': reward}
-            env_info = self._get_info(agent)
-            if 'fail' in env_info.keys():
-                info['fail'] = env_info['fail']
             info_n.append(info)
 
-        reward_sum = np.sum(reward_n)
         if self.shared_reward:
+            reward_sum = np.sum(reward_n)
             reward_n = [[reward_sum]] * self.n
 
         if self.post_step_callback is not None:
             self.post_step_callback(self.world)
 
-        terminate = []
-        current_dead = 0
-        attacker_belief = []
-        for agent in self.world.agents:
-            if agent.name == 'target':
-                terminate.append(agent.done)
-            if agent.name == 'attacker':
-                attacker_belief.append(agent.fake_target)
-                agent.last_belief = agent.fake_target
-                agent.last_lock = agent.is_locked
-            if agent.done:
-                current_dead += 1
-
-        self.is_ternimate = True if all(terminate) else False
+        terminate_target = [a.done for a in self.world.targets]
+        terminate_attacker = [a.done for a in self.world.attackers]
+        
+        # 只要目标被摧毁，或者所有攻击者都已阵亡，立即终止本局！
+        if (len(terminate_target) > 0 and all(terminate_target)) or (len(terminate_attacker) > 0 and all(terminate_attacker)):
+            self.is_ternimate = True
+        else:
+            self.is_ternimate = False
+            
         if self.is_ternimate:
             done_n = [True] * self.n
-
-        if self.update_belief is not None and not all(done_n):
-            if (self.current_step % 15 == 0 and self.current_step < 180) or current_dead > self.world.cnt_dead:
-                self.update_belief(self.world)
-
-        self.world.cnt_dead = current_dead
-        self.world.attacker_belief = attacker_belief
 
         return obs_n, agent_id_n, node_obs_n, adj_n, reward_n, done_n, info_n
 
     def reset(self):
         self.current_step = 0
+        # ================= 核心修复：回合重置时，同步清零物理世界的时间步 =================
+        self.world.current_step = self.current_step
         self.reset_callback(self.world)
         self._reset_render()
         
         obs_n, node_obs_n, adj_n, agent_id_n = [], [], [], []
-        self.agents = self.world.attackers
+        # 同步更新 GNN agents
+        if getattr(self.world, 'train_mode', 'attacker') == 'attacker':
+            self.agents = self.world.attackers
+        else:
+            self.agents = self.world.defenders
 
         for agent in self.agents:
             obs_n.append(self._get_obs(agent))
@@ -680,7 +483,9 @@ class MultiAgentGraphEnv(MultiAgentEnv):
             return None, None
         return self.graph_observation_callback(agent, self.world)
 
+    # ================= 修改的核心位置：向回调传递 self.world ================= #
     def _get_id(self, agent: Agent):
         if self.id_callback is None:
             return None
-        return self.id_callback(agent)
+        return self.id_callback(agent, self.world) 
+    # ========================================================================= #

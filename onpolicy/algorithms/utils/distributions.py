@@ -35,7 +35,7 @@ class FixedNormal(torch.distributions.Normal):
         return super().log_prob(actions).sum(-1, keepdim=True)
 
     def entrop(self):
-        return super.entropy().sum(-1)
+        return super().entropy().sum(-1)
 
     def mode(self):
         return self.mean
@@ -44,7 +44,7 @@ class FixedNormal(torch.distributions.Normal):
 # Bernoulli
 class FixedBernoulli(torch.distributions.Bernoulli):
     def log_probs(self, actions):
-        return super.log_prob(actions).view(actions.size(0), -1).sum(-1).unsqueeze(-1)
+        return super().log_prob(actions).view(actions.size(0), -1).sum(-1).unsqueeze(-1)
 
     def entropy(self):
         return super().entropy().sum(-1)
@@ -128,7 +128,8 @@ class DiagGaussian(nn.Module):
         self.fc_mean = init_(nn.Linear(num_inputs, num_outputs))
         self.logstd = AddBias(torch.zeros(num_outputs))
 
-    def forward(self, x: torch.tensor):
+    # ================= 核心修复：添加 available_actions=None ================= #
+    def forward(self, x: torch.tensor, available_actions=None):
         action_mean = self.fc_mean(x)
 
         zeros = torch.zeros(action_mean.size())
@@ -136,7 +137,13 @@ class DiagGaussian(nn.Module):
             zeros = zeros.cuda()
 
         action_logstd = self.logstd(zeros)
+        
+        # ================= 终极防 NaN 修复：给 action_logstd 加上合理的软限幅 =================
+        # 防止 std 下溢到 0 或者上溢到 Inf
+        action_logstd = torch.clamp(action_logstd, min=-5.0, max=2.0)
+        
         return FixedNormal(action_mean, action_logstd.exp())
+    # ======================================================================= #
 
 
 class Bernoulli(nn.Module):
@@ -171,9 +178,11 @@ class Bernoulli(nn.Module):
 
         self.linear = init_(nn.Linear(num_inputs, num_outputs))
 
-    def forward(self, x):
+    # ================= 顺手修复：添加 available_actions=None ================= #
+    def forward(self, x, available_actions=None):
         x = self.linear(x)
         return FixedBernoulli(logits=x)
+    # ======================================================================= #
 
 
 class AddBias(nn.Module):

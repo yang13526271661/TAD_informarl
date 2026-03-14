@@ -69,17 +69,20 @@ class Runner(object):
             if not os.path.exists(self.gif_dir):
                 os.makedirs(self.gif_dir)
         else:
+            # ================= 核心修复：强制模型保存在固定的 models 文件夹下 ================= #
+            self.run_dir = config["run_dir"]
+            self.save_dir = str(self.run_dir / 'models')
+            if not os.path.exists(self.save_dir):
+                os.makedirs(self.save_dir)
+                
             if self.use_wandb:
-                self.save_dir = str(wandb.run.dir)
+                pass # Wandb 自己管日志，但不干扰我们的模型保存路径
             else:
-                self.run_dir = config["run_dir"]
                 self.log_dir = str(self.run_dir / 'logs')
                 if not os.path.exists(self.log_dir):
                     os.makedirs(self.log_dir)
                 self.writter = SummaryWriter(self.log_dir)
-                self.save_dir = str(self.run_dir / 'models')
-                if not os.path.exists(self.save_dir):
-                    os.makedirs(self.save_dir)
+            # ================================================================================== #
 
         if self.all_args.env_name == "GraphMPE":
             from onpolicy.algorithms.graph_mappo import GR_MAPPO as TrainAlgo
@@ -186,6 +189,11 @@ class Runner(object):
         torch.save(policy_actor.state_dict(), str(self.save_dir) + "/actor.pt")
         policy_critic = self.trainer.policy.critic
         torch.save(policy_critic.state_dict(), str(self.save_dir) + "/critic.pt")
+        
+        # ================= 新增修改：额外保存一份包含结构的完整 Actor 模型 ================= #
+        # 这样在 graph_auv_adg.py 中可以直接整体加载，无需实例化网络架构！
+        torch.save(policy_actor, str(self.save_dir) + "/actor_structure.pt")
+        # ==================================================================================== #
 
     def restore(self):
         """Restore policy's networks from a saved model."""

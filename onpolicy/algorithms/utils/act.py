@@ -215,9 +215,14 @@ class ACTLayer(nn.Module):
             action_logits = self.action_out(x, available_actions)
             action_log_probs = action_logits.log_probs(action)
             if active_masks is not None:
-                dist_entropy = (
-                    action_logits.entropy() * active_masks.squeeze(-1)
-                ).sum() / active_masks.sum()
+                # ================= 核心修复：保持 active_masks 的形状用于广播 ================= #
+                entropy = action_logits.entropy()
+                if len(entropy.shape) == len(active_masks.shape):
+                    dist_entropy = (entropy * active_masks).sum() / active_masks.sum()
+                else:
+                    # 如果 entropy 的维度比 mask 少（这在某些分布里可能发生），处理 squeeze
+                    dist_entropy = (entropy * active_masks.squeeze(-1)).sum() / active_masks.sum()
+                # =========================================================================== #
             else:
                 dist_entropy = action_logits.entropy().mean()
 

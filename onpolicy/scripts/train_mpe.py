@@ -9,11 +9,16 @@ from pathlib import Path
 import torch
 from onpolicy import global_var as glv
 import os, sys
+import warnings
+# 忽略掉烦人的 FutureWarning
+warnings.filterwarnings("ignore", category=FutureWarning)
 
 sys.path.append(os.path.abspath(os.getcwd()))
 
 from utils.utils import print_args, print_box, connected_to_internet
-from onpolicy.config import get_config
+# ================= 核心修复 ================= #
+from onpolicy.config import get_config, graph_config  # 这里将 graph_config 导入进来
+# ============================================ #
 from multiagent.MPE_env import MPEEnv, GraphMPEEnv
 from onpolicy.envs.env_wrappers import (
     SubprocVecEnv,
@@ -48,11 +53,8 @@ def make_train_env(all_args: argparse.Namespace):
         return DummyVecEnv([get_env_fn(0)])
     else:
         if all_args.env_name == "GraphMPE":
-            return GraphSubprocVecEnv(
-                [get_env_fn(i) for i in range(all_args.n_rollout_threads)]
-            )
+            return GraphSubprocVecEnv([get_env_fn(i) for i in range(all_args.n_rollout_threads)])
         return SubprocVecEnv([get_env_fn(i) for i in range(all_args.n_rollout_threads)])
-
 
 def make_eval_env(all_args: argparse.Namespace):
     def get_env_fn(rank: int):
@@ -75,180 +77,80 @@ def make_eval_env(all_args: argparse.Namespace):
         return DummyVecEnv([get_env_fn(0)])
     else:
         if all_args.env_name == "GraphMPE":
-            return GraphSubprocVecEnv(
-                [get_env_fn(i) for i in range(all_args.n_rollout_threads)]
-            )
-        return SubprocVecEnv(
-            [get_env_fn(i) for i in range(all_args.n_eval_rollout_threads)]
-        )
-
-
-def parse_args(args, parser):
-
-    parser.add_argument(
-        "--collaborative",
-        type=lambda x: bool(strtobool(x)),
-        default=True,
-        help="Number of agents in the env",
-    )
-    parser.add_argument(
-        "--max_speed",
-        type=float,
-        default=2,
-        help="Max speed for agents. NOTE that if this is None, "
-        "then max_speed is 2 with discrete action space",
-    )
-    parser.add_argument(
-        "--collision_rew",
-        type=float,
-        default=5,
-        help="The reward to be negated for collisions with other "
-        "agents and obstacles",
-    )
-    parser.add_argument(
-        "--goal_rew",
-        type=float,
-        default=5,
-        help="The reward to be added if agent reaches the goal",
-    )
-    parser.add_argument(
-        "--min_dist_thresh",
-        type=float,
-        default=0.05,
-        help="The minimum distance threshold to classify whether "
-        "agent has reached the goal or not",
-    )
-    parser.add_argument(
-        "--use_dones",
-        type=lambda x: bool(strtobool(x)),
-        default=False,
-        help="Whether we want to use the 'done=True' "
-        "when agent has reached the goal or just return False like "
-        "the `simple.py` or `simple_spread.py`",
-    )
-
-    all_args = parser.parse_known_args(args)[0]
-
-    return all_args, parser
+            return GraphSubprocVecEnv([get_env_fn(i) for i in range(all_args.n_eval_rollout_threads)])
+        return SubprocVecEnv([get_env_fn(i) for i in range(all_args.n_eval_rollout_threads)])
 
 
 def main(args):
     parser = get_config()
-    all_args, parser = parse_args(args, parser)
+    all_args = parser.parse_known_args(args)[0]
+
+    # ================= 核心修复：从你原本的 config.py 完美加载所有 GNN 参数 ================= #
     if all_args.env_name == "GraphMPE":
-        from onpolicy.config import graph_config
-
         all_args, parser = graph_config(args, parser)
+    # ======================================================================================== #
 
-    if all_args.algorithm_name in ["rmappo"]:
-        assert (
-            all_args.use_recurrent_policy or all_args.use_naive_recurrent_policy
-        ), "check recurrent policy!"
-    elif all_args.algorithm_name in ["mappo"]:
-        assert (
-            all_args.use_recurrent_policy == False
-            and all_args.use_naive_recurrent_policy == False
-        ), "check recurrent policy!"
+    if all_args.algorithm_name == "rmappo":
+        assert all_args.use_recurrent_policy or all_args.use_naive_recurrent_policy, "check recurrent policy!"
+    elif all_args.algorithm_name == "mappo":
+        assert all_args.use_recurrent_policy == False and all_args.use_naive_recurrent_policy == False, "check recurrent policy!"
     else:
         raise NotImplementedError
 
-    assert (
-        all_args.share_policy == True
-        and all_args.scenario_name == "simple_speaker_listener"
-    ) == False, (
-        "The simple_speaker_listener scenario can not use shared policy. "
-        "Please check the config.py."
-    )
-
     # cuda
     if all_args.cuda and torch.cuda.is_available():
-        print_box("Choose to use gpu...")
+        print("choose to use gpu...")
         device = torch.device("cuda:0")
         torch.set_num_threads(all_args.n_training_threads)
         if all_args.cuda_deterministic:
             torch.backends.cudnn.benchmark = False
             torch.backends.cudnn.deterministic = True
     else:
-        print_box("Choose to use cpu...")
+        print("choose to use cpu...")
         device = torch.device("cpu")
         torch.set_num_threads(all_args.n_training_threads)
 
-    if all_args.verbose:
-        print_args(all_args)
-
-    # run dir
-    run_dir = (
-        Path(os.path.split(os.path.dirname(os.path.abspath(__file__)))[0] + "/results")
-        / all_args.env_name
-        / all_args.scenario_name
-        / all_args.algorithm_name
-        / all_args.experiment_name
-    )
+    # ================= 核心修复：强制固定日志与模型路径，禁止生成 run 文件夹 ================= #
+    run_dir = Path(os.path.split(os.path.dirname(os.path.abspath(__file__)))[0] + "/results") / all_args.env_name / all_args.scenario_name / all_args.algorithm_name / all_args.experiment_name
     if not run_dir.exists():
         os.makedirs(str(run_dir))
+    # ===================================================================================== #
 
-    # wandb
-    if all_args.use_wandb:
-        # for supercloud when no internet_connection
-        if not connected_to_internet():
-            import json
-
-            # save a json file with your wandb api key in your
-            # home folder as {'my_wandb_api_key': 'INSERT API HERE'}
-            # NOTE this is only for running on systems without internet access
-            # have to run `wandb sync wandb/run_name` to sync logs to wandboard
-            os.environ["WANDB_API_KEY"] = "e5b9146e7ce16fad6ec90598e7f0f7a940f20b7a"
-            os.environ["WANDB_MODE"] = "online"
-            # os.environ["WANDB_MODE"] = "dryrun"
-            os.environ["WANDB_SAVE_CODE"] = "true"
-
-        print_box("Creating wandboard...")
-        run = wandb.init(
-            config=all_args,
-            project=all_args.project_name,
-            notes=socket.gethostname(),
-            name=str(all_args.scenario_name),
-            group=all_args.scenario_name,
-            dir=str(run_dir),
-            job_type="training",
-            reinit=True,
-        )
-    else:
-        if not run_dir.exists():
-            curr_run = "run1"
-        else:
-            exst_run_nums = [
-                int(str(folder.name).split("run")[1])
-                for folder in run_dir.iterdir()
-                if str(folder.name).startswith("run")
-            ]
-            if len(exst_run_nums) == 0:
-                curr_run = "run1"
-            else:
-                curr_run = "run%i" % (max(exst_run_nums) + 1)
-        run_dir = run_dir / curr_run
-        if not run_dir.exists():
-            os.makedirs(str(run_dir))
-
-    setproctitle.setproctitle(
-        str(all_args.algorithm_name)
-        + "-"
-        + str(all_args.env_name)
-        + "-"
-        + str(all_args.experiment_name)
-        + "@"
-        + str(all_args.user_name)
-    )
+    setproctitle.setproctitle(str(all_args.algorithm_name) + "-" + str(all_args.env_name) + "-" + str(all_args.experiment_name) + "@" + str(all_args.user_name))
 
     # seed
     torch.manual_seed(all_args.seed)
     torch.cuda.manual_seed_all(all_args.seed)
     np.random.seed(all_args.seed)
 
+    # wandb init
+    if all_args.use_wandb:
+        run = wandb.init(config=all_args,
+                         project=all_args.project_name,
+                         entity=all_args.user_name,
+                         notes=socket.gethostname(),
+                         name=str(all_args.algorithm_name) + "_" +
+                         str(all_args.experiment_name) +
+                         "_seed" + str(all_args.seed),
+                         group=all_args.scenario_name,
+                         dir=str(run_dir),
+                         job_type="training",
+                         reinit=True)
+
     # env init
     envs = make_train_env(all_args)
     eval_envs = make_eval_env(all_args) if all_args.use_eval else None
-    num_agents = all_args.num_agents
+    
+    # ================= 同步底层核心维度 (支持动态切换训练主体) ================= #
+    
+    current_train_mode = os.environ.get('TRAIN_MODE', 'attacker')
+    
+    if current_train_mode == 'attacker':
+        num_agents = all_args.num_attacker
+    else:
+        num_agents = all_args.num_defender
+    all_args.num_agents = num_agents
+    # ======================================================================= #
 
     config = {
         "all_args": all_args,
@@ -267,33 +169,40 @@ def main(args):
             from onpolicy.runner.shared.mpe_runner import MPERunner as Runner
     else:
         if all_args.env_name == "GraphMPE":
-            raise NotImplementedError
+            raise NotImplementedError("Graph policy currently does not support separated runner out of the box.")
         from onpolicy.runner.separated.mpe_runner import MPERunner as Runner
 
     runner = Runner(config)
-    if all_args.verbose:
-        print_box("Actor Network", 80)
-        if type(runner.policy) == list:
-            print_box(runner.policy[0].actor, 80)
-            print_box("Critic Network", 80)
-            print_box(runner.policy[0].critic, 80)
+    print("model_dir:", all_args.model_dir)
+    # ================= 核心修复：终极模型继承机制与路径追踪 ================= #
+    if hasattr(all_args, 'model_dir') and all_args.model_dir is not None and all_args.model_dir != "":
+        model_path = str(all_args.model_dir)
+        print(f"\n" + "="*60)
+        print(f"[DEBUG] 接收到模型加载指令！")
+        print(f"[DEBUG] 正在核实绝对路径: {os.path.abspath(model_path)}")
+        
+        if os.path.exists(model_path):
+            try:
+                actor_state = torch.load(os.path.join(model_path, 'actor.pt'), map_location=device)
+                runner.trainer.policy.actor.load_state_dict(actor_state)
+                critic_state = torch.load(os.path.join(model_path, 'critic.pt'), map_location=device)
+                runner.trainer.policy.critic.load_state_dict(critic_state)
+                print(f"[SUCCESS] 历史模型继承成功！站在巨人的肩膀上继续进化！")
+            except Exception as e:
+                print(f"[ERROR] 路径存在，但 PyTorch 模型加载失败: {e}")
         else:
-            print_box(runner.policy.actor, 80)
-            print_box("Critic Network", 80)
-            print_box(runner.policy.critic, 80)
+            print(f"[WARNING] 哎呀！文件夹不存在，被迫退回随机初始化！")
+        print("="*60 + "\n")
+    # ========================================================================= #
+
     runner.run()
 
     # post process
     envs.close()
     if all_args.use_eval and eval_envs is not envs:
         eval_envs.close()
-
     if all_args.use_wandb:
-        run.finish()
-    else:
-        runner.writter.export_scalars_to_json(str(runner.log_dir + "/summary.json"))
-        runner.writter.close()
-
+        wandb.finish()
 
 if __name__ == "__main__":
     main(sys.argv[1:])

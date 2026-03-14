@@ -55,15 +55,11 @@ class Entity(object):
         self.color = None
         # max speed and accel
         self.max_speed = None
-        self.max_angular = None
-        self.max_accel = None
         self.accel = None
-        # state: including internal/mental state p_pos, p_vel
+        # state
         self.state = EntityState()
         # mass
         self.initial_mass = 1.0
-        # commu channel
-        self.channel = None
 
     @property
     def mass(self):
@@ -73,18 +69,11 @@ class Entity(object):
 class Landmark(Entity):
     def __init__(self):
         super(Landmark, self).__init__()
-        self.R = None
-        self.delta = None
-        self.Ls = None
-        self.movable = False
 
 # properties of agent entities
 class Agent(Entity):
     def __init__(self):
         super(Agent, self).__init__()
-
-        # agents are dummy
-        self.dummy = False
         # agents are movable by default
         self.movable = True
         # cannot send communication signals
@@ -97,55 +86,29 @@ class Agent(Entity):
         self.c_noise = None
         # control range
         self.u_range = 1.0
-        # state: including communication state(communication utterance) c and internal/mental state p_pos, p_vel
+        # state
         self.state = AgentState()
-        # action: physical action u & communication action c
+        # action
         self.action = Action()
         # script behavior to execute
         self.action_callback = None
-        # zoe 20200420
-        self.goal = None
-        # finley
         self.done = False
-        self.policy_action = np.array([0,0])
-        self.network_action = np.array([0,0])
+
 
 class Target(Agent):
     def __init__(self):
         super(Target, self).__init__()
-        self.name = 'target'
-        self.id = None
-        self.attackers = []  # attackers that are aiming him
-        self.defenders = []  # defenders that help you avoid attacker
-        self.cost = [] # to store cost of each tad cost
-        self.attacker = None # local TAD combination
-        self.defender = None
+
 
 class Attacker(Agent):
     def __init__(self):
         super(Attacker, self).__init__()
-        self.name = 'attacker'
-        self.id = None
-        self.true_target = None
-        self.fake_target = None
-        self.defenders = []
-        self.flag_kill = False  # successful kill a target
-        self.flag_dead = False  # being killed by defender
-        self.last_belief = None
-        self.last_lock = False
-        self.is_locked = False  # whether lock the true target
-        self.last_switch = 0 # 上一个切换时刻
+        # self.assign_target = -1
 
-        self.belief_act = None
-        self.lock_act = None
 
 class Defender(Agent):
     def __init__(self):
         super(Defender, self).__init__()
-        self.name = 'defender'
-        self.id = None
-        self.attacker = None # attacker to defend at
-        self.target = None # the target that your attacker is aiming at
 
 
 # multi-agent world
@@ -154,6 +117,10 @@ class World(object):
         # list of agents and entities (can change at execution-time!)
         self.agents = []
         self.landmarks = []
+        self.targets = []
+        self.attackers = []
+        self.defenders = []
+
         self.walls = []
         # communication channel dimensionality
         self.dim_c = 0
@@ -163,8 +130,8 @@ class World(object):
         self.dim_color = 3
         # simulation timestep
         self.dt = 0.1
-        # physical damping（阻尼）
-        self.damping = 0 # 0.25
+        # physical damping
+        self.damping = 0.25
         # contact response parameters
         self.contact_force = 1e+2
         self.contact_margin = 1e-3
@@ -172,17 +139,11 @@ class World(object):
         self.cache_dists = False
         self.cached_dist_vect = None
         self.cached_dist_mag = None
-        # finley
-        self.world_length = 200
-        self.world_step = 0
-        self.num_agents = 0
-        self.num_landmarks = 0
 
-        self.targets = []
-        self.defenders= []
-        self.attackers = []
-        self.cnt_dead = 0
+        self.world_length = 200
+
         self.attacker_belief = []
+        self.cnt_dead = 0
 
     # return all entities in the world
     @property
@@ -200,23 +161,19 @@ class World(object):
         return [agent for agent in self.agents if agent.action_callback is not None]
 
     def calculate_distances(self):
-        """
-        cached_dist_vect: 类似图论矩阵, 记录i_a和i_b相对位置关系的向量
-        """
         if self.cached_dist_vect is None:
             # initialize distance data structure
             self.cached_dist_vect = np.zeros((len(self.entities),
                                               len(self.entities),
                                               self.dim_p))
-            # calculate minimum distance for a collision between all entities （size相加?）
-            self.min_dists = np.zeros((len(self.entities), len(self.entities)))  # N*N数组，N为智能体个数
+            # calculate minimum distance for a collision between all entities
+            self.min_dists = np.zeros((len(self.entities), len(self.entities)))
             for ia, entity_a in enumerate(self.entities):
                 for ib in range(ia + 1, len(self.entities)):
                     entity_b = self.entities[ib]
                     min_dist = entity_a.size + entity_b.size
                     self.min_dists[ia, ib] = min_dist
                     self.min_dists[ib, ia] = min_dist
-            # 实对称距离矩阵
 
         for ia, entity_a in enumerate(self.entities):
             for ib in range(ia + 1, len(self.entities)):
@@ -227,7 +184,7 @@ class World(object):
 
         self.cached_dist_mag = np.linalg.norm(self.cached_dist_vect, axis=2)
 
-        self.cached_collisions = (self.cached_dist_mag <= self.min_dists)  # bool
+        self.cached_collisions = (self.cached_dist_mag <= self.min_dists)
 
     def assign_agent_colors(self):
         n_dummies = 0
@@ -237,81 +194,45 @@ class World(object):
         if hasattr(self.agents[0], 'adversary'):
             n_adversaries = len([a for a in self.agents if a.adversary])
         n_good_agents = len(self.agents) - n_adversaries - n_dummies
-        # r g b
-        dummy_colors = [(0.25, 0.75, 0.25)] * n_dummies
-        # sns.color_palette("OrRd_d", n_adversaries)
-        adv_colors = [(0.75, 0.25, 0.25)] * n_adversaries
-        # sns.color_palette("GnBu_d", n_good_agents)
-        good_colors = [(0.25, 0.25, 0.75)] * n_good_agents
+        # sns.color_palette("OrRd", 10)
+        dummy_colors = [(0.25, 0.25, 0.25)] * n_dummies
+        adv_colors = sns.color_palette("OrRd", n_adversaries)
+        good_colors = sns.color_palette("GnBu", n_good_agents)
         colors = dummy_colors + adv_colors + good_colors
         for color, agent in zip(colors, self.agents):
             agent.color = color
 
-    # landmark color
     def assign_landmark_colors(self):
         for landmark in self.landmarks:
             landmark.color = np.array([0.25, 0.25, 0.25])
 
+    def assign_target_colors(self):
+        for target in self.targets:
+            target.color = np.array([0., 1., 0.])
+
+    def assign_attacker_colors(self):
+        for attacker in self.attackers:
+            attacker.color = np.array([1., 0., 0.])
+
+    def assign_defender_colors(self):
+        for defender in self.defenders:
+            defender.color = np.array([0., 0., 1.])
+
     # update state of the world
     def step(self):
+        # set actions for scripted agents 
+        for agent in self.scripted_agents:
+            agent.action.u = agent.action_callback(agent, self)
+            agent.action.c = np.zeros(self.dim_c)
 
-        self.world_step += 1
-        # print("world step is {} ".format(self.world_step))
-
-        # if self.world_step > 30:
-        #     self.attackers[0].true_target = 0
-        #     self.attackers[0].fake_target = 0
-    
-        # 2t1a1d
-        # self.attackers[0].fake_target = 1
-        
-        # 3t2a2d
-        # self.attackers[0].fake_target = 1
-        # self.attackers[1].fake_target = 2
-
-        # 4t2a3d
-        # self.attackers[0].fake_target = 1
-        # self.attackers[1].fake_target = 3
-
-        # 6t3a4d
-        # self.attackers[0].fake_target = 3
-        # self.attackers[1].fake_target = 4
-        # self.attackers[2].fake_target = 0
-
-        # if self.world_step > 32:
-        #     self.attackers[0].true_target = 0
-        #     self.attackers[0].fake_target = 0
-        #     self.attackers[1].true_target = 2
-        #     self.attackers[1].fake_target = 2
-        #     self.attackers[2].true_target = 3
-        #     self.attackers[2].fake_target = 3
-        #     self.attackers[3].true_target = 1
-        #     self.attackers[3].fake_target = 1
-        #     self.attackers[4].true_target = 3
-        #     self.attackers[4].fake_target = 3
-
-        # set actions for scripted agents
-        for i, agent in enumerate(self.agents):
-            if agent.name == 'target':
-                action = agent.action_callback(agent, self.attackers[agent.attacker], self.defenders[agent.defender])
-                agent.action.u = action
-                # print("agent {} action is {}".format(agent.id, action))
-            elif agent.name == 'attacker':
-                action = agent.action_callback(self.targets[agent.fake_target], agent)
-                agent.action.u = action
-                # print("agent {} action is {}".format(agent.id, action))
-            elif agent.name == 'defender':
-                action = agent.action_callback(self.targets[self.attackers[agent.attacker].fake_target], self.attackers[agent.attacker], agent)
-                agent.action.u = action
-                # print("agent {} action is {}".format(agent.id, action))
-            
-        
         # gather forces applied to entities
-        u = [None] * len(self.agents)  # 空数组, 存储所有TAD的action
+        p_force = [None] * len(self.entities)
         # apply agent physical controls
-        u = self.apply_action_force(u)
+        p_force = self.apply_action_force(p_force)
+        # apply environment forces
+        p_force = self.apply_environment_force(p_force)
         # integrate physical state
-        self.integrate_state(u)
+        self.integrate_state(p_force)
 
         # calculate and store distances between all entities
         if self.cache_dists:
@@ -320,24 +241,60 @@ class World(object):
     # gather agent action forces
     def apply_action_force(self, u):
         # set applied forces
-        '''
-        for adversary agents, u = [ax, ay]; 
-        for escaping agents, u = [Vx, Vy];
-        '''
         for i, agent in enumerate(self.agents):
-            u[i] = agent.action.u
+            # ================= 核心修复：防止动作未分配 ================= #
+            if agent.action.u is None:
+                u[i] = np.zeros(self.dim_p)
+            else:
+                u[i] = agent.action.u
+                if hasattr(u[i], "shape") and u[i].shape != (2,):
+                    print(f"!!! agent {agent.name} has u of shape {u[i].shape} !!!")
+            # ========================================================== #
         return u
 
-    def integrate_state(self, u):  # u:[[1*2]...] 1*2n, [[ax, ay]...]
+    def apply_environment_force(self, p_force):
+        # simple (but inefficient) collision response
+        for a, entity_a in enumerate(self.entities):
+            for b, entity_b in enumerate(self.entities):
+                if(b <= a):
+                    continue
+                [f_a, f_b] = self.get_collision_force(entity_a, entity_b)
+                if(f_a is not None):
+                    if(p_force[a] is None):
+                        p_force[a] = 0.0
+                    p_force[a] = f_a + p_force[a]
+                if(f_b is not None):
+                    if(p_force[b] is None):
+                        p_force[b] = 0.0
+                    p_force[b] = f_b + p_force[b]
+        # wall collisions
+        for a, entity_a in enumerate(self.agents):
+            for wall in self.walls:
+                f_a = self.get_wall_collision_force(entity_a, wall)
+                if f_a is not None:
+                    if p_force[a] is None:
+                        p_force[a] = 0.0
+                    p_force[a] = f_a + p_force[a]
+        return p_force
+
+    def integrate_state(self, u):  
         for i, agent in enumerate(self.agents):
-            # if agent.name == 'defender':
-            #     agent.state.p_vel = np.array([0, 0])
+            # [新增防线]：如果这个智能体是不可移动的（比如 Target），直接跳过物理计算
+            if not agent.movable:
+                continue
+
+            if u[i] is None:
+                u[i] = np.zeros(self.dim_p)
 
             v = agent.state.p_vel + u[i] * self.dt
-            if np.linalg.norm(v) != 0:
+            
+            # [安全修复]：加上 agent.max_speed is not None 的判断
+            if agent.max_speed is not None and np.linalg.norm(v) > agent.max_speed:
                 v = v / np.linalg.norm(v) * agent.max_speed
+            
+            # [极端安全] 绝对兜底：禁止直接炸到无穷大
+            v = np.nan_to_num(v, nan=0.0, posinf=agent.max_speed if agent.max_speed else 10.0, neginf=-(agent.max_speed if agent.max_speed else 10.0))
 
-            # print("{} {} done is {}".format(agent.name, agent.id, agent.done))
             if agent.done:
                 agent.state.p_vel = np.array([0, 0]) # 速度清零
             else:
@@ -345,9 +302,76 @@ class World(object):
                 theta = np.arctan2(v_y, v_x)
                 if theta < 0:
                     theta += np.pi * 2
-                # update phi
-                agent.state.phi = theta
-                agent.state.p_vel = np.array([v_x, v_y])
-            agent.state.p_pos += agent.state.p_vel * self.dt
+                
+                delta_theta = Get_antiClockAngle(v, agent.state.p_vel)
+                if delta_theta > np.pi:
+                    delta_theta = delta_theta - np.pi * 2
+                agent.state.p_omg = delta_theta / self.dt
 
-            # print("{} {} pos is {}".format(agent.name, agent.id, np.linalg.norm(agent.state.p_pos)))
+                agent.state.phi = theta
+                agent.state.last_a = u[i]
+                agent.state.V = np.linalg.norm(v)
+                agent.state.p_vel = v
+                agent.state.p_pos += agent.state.p_vel * self.dt
+
+    def update_agent_state(self, agent):
+        pass
+
+    # get collision forces for any contact between two entities
+    def get_collision_force(self, entity_a, entity_b):
+        if (not entity_a.collide) or (not entity_b.collide):
+            return [None, None]  # not a collider
+        if (entity_a is entity_b):
+            return [None, None]  # don't collide against itself
+            
+        delta_pos = entity_a.state.p_pos - entity_b.state.p_pos
+        dist = np.linalg.norm(delta_pos)
+        
+        # ================= 终极防 NaN 核心补丁 =================
+        if dist == 0.0:
+            # 如果完全重叠，给一个极微小的随机扰动，否则 delta_pos 为 0 无法产生排斥方向
+            dist = 1e-5
+            delta_pos = np.random.uniform(-1e-5, 1e-5, self.dim_p)
+            
+        # 限制最小物理计算距离 (比如0.1米)
+        # 即使它们发生了极其严重的穿模，也假装它们还有0.1米的距离，防止弹簧力爆炸趋于无穷大
+        dist_safe = max(dist, 0.1) 
+        # =======================================================
+
+        dist_min = entity_a.size + entity_b.size
+        # softmax penetration
+        k = self.contact_margin
+        
+        # 【注意】这里原本用的是 dist，现在全部替换为 dist_safe
+        penetration = np.logaddexp(0, -(dist_safe - dist_min)/k)*k
+        force = self.contact_force * delta_pos / dist_safe * penetration
+        
+        force_a = +force if entity_a.movable else None
+        force_b = -force if entity_b.movable else None
+        return [force_a, force_b]
+
+    # get collision forces for contact between an entity and a wall
+    def get_wall_collision_force(self, entity, wall):
+        if entity.ghost and not wall.hard:
+            return None
+        if wall.orient == 'H':
+            prll_dim = 0
+            perp_dim = 1
+        else:
+            prll_dim = 1
+            perp_dim = 0
+        ent_pos = entity.state.p_pos
+        if (ent_pos[prll_dim] < wall.endpoints[0] - entity.size or
+                ent_pos[prll_dim] > wall.endpoints[1] + entity.size):
+            return None
+        dist = ent_pos[perp_dim] - wall.axis_pos
+        ent_min_dist = wall.width + entity.size
+        # softmax penetration
+        k = self.contact_margin
+        penetration = np.logaddexp(0, -(abs(dist) - ent_min_dist)/k)*k
+        force = self.contact_force * penetration * np.sign(dist)
+        if prll_dim == 0:
+            force_vector = np.array([0, force])
+        else:
+            force_vector = np.array([force, 0])
+        return force_vector
