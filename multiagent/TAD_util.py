@@ -108,7 +108,7 @@ def map_defender_action(agent, raw_action):
 
 def map_attacker_action(agent, world, raw_action):
     w_v = np.clip(raw_action[0], -1.0, 1.0)
-    xi_D = 0.3 
+    xi_D = 0.5
     w_d = np.clip(raw_action[1], 0.0, 1.0) + xi_D
     w_t = np.clip(raw_action[2], -0.15, 1.35)
     
@@ -120,28 +120,36 @@ def map_attacker_action(agent, world, raw_action):
     eta_T = 1.0
     F_T = eta_T * agent.max_speed * e_T
     
-    eta_D = 1000.0
-    rho_D = 25.0 
+    eta_D = 50000.0
     F_D = np.zeros(2)
     for defender in world.defenders:
         vec_from_def = agent.state.p_pos - defender.state.p_pos
         dist_from_def = np.linalg.norm(vec_from_def)
-        if 0 < dist_from_def < rho_D: 
-            dist_safe = max(dist_from_def, 0.1) 
-            mag = eta_D * (1.0 / dist_safe - 1.0 / rho_D) * (1.0 / dist_safe**2)
-            F_D += (vec_from_def / dist_safe) * mag
-            
-    eta_A = 100.0
-    rho_A = 25.0
+        
+        # 修改 TAD_util.py 中的 F_D 计算
+        if dist_from_def <= 25.0: 
+            edge_dist = dist_from_def - agent.size - defender.size
+            # 【直接删掉 if edge_dist > 0:】
+            edge_dist_safe = max(edge_dist, 0.1) # 只要重叠，强行按照 0.1m 的极限距离计算
+            rho_D_real = 25.0 - agent.size - defender.size 
+            mag = eta_D * (1.0 / edge_dist_safe - 1.0 / rho_D_real) * (1.0 / edge_dist_safe**2)
+            F_D += (vec_from_def / dist_from_def) * mag
+                
+    eta_A = 1000.0
     F_A = np.zeros(2)
     for other_attacker in world.attackers:
         if other_attacker is agent: continue
         vec_from_other = agent.state.p_pos - other_attacker.state.p_pos
         dist_other = np.linalg.norm(vec_from_other)
-        if 0 < dist_other < rho_A:
-            dist_safe = max(dist_other, 0.1)
-            mag = eta_A * (1.0 / dist_safe - 1.0 / rho_A) * (1.0 / dist_safe**2)
-            F_A += (vec_from_other / dist_safe) * mag
+        
+        # 【修复2】：修复你上一轮忘了改的攻击者撞车 Bug，同样受限于雷达并使用边缘距离
+        if dist_other <= 25.0:
+            edge_dist_A = dist_other - agent.size - other_attacker.size
+            if edge_dist_A > 0:
+                edge_dist_safe_A = max(edge_dist_A, 0.1)
+                rho_A_real = 25.0 - agent.size - other_attacker.size
+                mag = eta_A * (1.0 / edge_dist_safe_A - 1.0 / rho_A_real) * (1.0 / edge_dist_safe_A**2)
+                F_A += (vec_from_other / dist_other) * mag
 
     R_A_sen = 25.0
     num_rays_half = 15 
@@ -169,16 +177,18 @@ def map_attacker_action(agent, world, raw_action):
                 
                 center_rel = vec_ad / (1.0 - lam_sq) 
                 R_O = (np.sqrt(lam_sq) / (1.0 - lam_sq)) * dist_ad
+                # 【修复3】：物理装甲厚度保底！防穿模！
+                R_O_effective = max(R_O, agent.size + def_agent.size)
                 
                 proj_len = np.dot(center_rel, u_vec)
                 if proj_len > 0:
                     dist_line_sq = np.dot(center_rel, center_rel) - proj_len**2
-                    if dist_line_sq <= R_O**2:
+                    if dist_line_sq <= R_O_effective**2:
                         hit = True
                         break
             if hit: N_hit += 1
         return 1.0 - (N_hit / num_rays_half)
-
+    
     r_A_l = get_free_rate(angles_l)
     r_A_r = get_free_rate(angles_r)
     
@@ -191,10 +201,7 @@ def map_attacker_action(agent, world, raw_action):
     if r_A_l == 1.0 and r_A_r == 1.0:
         F_V = np.array([0.0, 0.0])
     else:
-        if r_A_l > r_A_r:
-            F_V = eta_V * agent.max_speed * (r_A_l ** 2) * e_T_perp_L
-        else:
-            F_V = eta_V * agent.max_speed * (r_A_r ** 2) * e_T_perp_R
+        F_V = eta_V * agent.max_speed * ((r_A_l ** 2) * e_T_perp_L + (r_A_r ** 2) * e_T_perp_R)
     # ====================================================================
         
     combined_force = w_v * F_V + w_d * F_D + w_t * F_T + F_A

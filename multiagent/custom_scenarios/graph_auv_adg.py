@@ -10,7 +10,7 @@ torch.set_num_threads(1) # <--- 强制封杀底层多线程争抢
 # --- 论文真实场景参数设定 (放大 2.5 倍以适应 500 步训练) ---
 R_SAFE = 5.0     
 R_C = 50.0       
-R_B = 100.0      
+R_B = 75.0      
 V_A_MAX = 5.4    # (2.16 * 2.5) 攻击者最大速度 
 V_D_MAX = 3.0    # (1.2 * 2.5) 防御者最大速度
 
@@ -23,17 +23,18 @@ def defender_policy(agent, world):
         return np.array([0., 0.])
     
     target = world.targets[0]
+    # 获取防守者自己是否在 RC 内
     agent_in_rc = np.linalg.norm(agent.state.p_pos - target.state.p_pos) < R_C
     
     # 筛选出在感知范围内的攻击者
     observable_attackers = []
     for a in world.attackers:
         if a.done: continue
-        a_in_rc = np.linalg.norm(a.state.p_pos - target.state.p_pos) < R_C
+        a_in_rc = np.linalg.norm(a.state.p_pos - target.state.p_pos) - a.size < R_C
         dist = np.linalg.norm(a.state.p_pos - agent.state.p_pos)
         
-        # 严格遵守论文：同在 Rc 内，或在 25米 内
-        if a_in_rc or dist <= 25.0: 
+        # 【逻辑修复】：必须防守者和攻击者都在 RC 内，才能靠基站发现对方！
+        if (agent_in_rc and a_in_rc) or dist <= 25.0: 
             observable_attackers.append(a)
             
     # 如果雷达里没有任何攻击者，原地待命/巡逻
@@ -293,7 +294,7 @@ class Scenario(BaseScenario):
             
         for i in range(self.num_defender):
             defender = Defender()
-            defender.name = 'defender %d' % i; defender.collide = True; defender.movable = True; defender.max_speed = V_D_MAX; defender.max_accel = 3.0; defender.size = 3.0; defender.color = np.array([0.2, 0.2, 0.95])
+            defender.name = 'defender %d' % i; defender.collide = True; defender.movable = True; defender.max_speed = V_D_MAX; defender.max_accel = 4.0; defender.size = 3.0; defender.color = np.array([0.2, 0.2, 0.95])
             # 如果当前是攻击者在训练，防守者是陪练，绑定加载的模型策略
             if world.train_mode == 'attacker':
                 defender.action_callback = self.opponent_policy
@@ -416,7 +417,16 @@ class Scenario(BaseScenario):
                 agent.prev_dist_to_att = None
         # ========================================================================= #
 
-        cl_ratio = getattr(world, 'CL_ratio', 1.0) 
+        # 1. 获取动态难度进度 (Curriculum Learning)
+        if getattr(world, 'use_CL', False):
+            cl_ratio = getattr(world, 'CL_ratio', 0.0)
+        else:
+            cl_ratio = getattr(world, 'CL_ratio', 1.0)
+            
+        # ================= 核心修复：渲染/测试时强制设为满血难度 =================
+        import sys
+        if 'eval_mpe' in sys.argv[0]:
+            cl_ratio = 1.0
         
         for landmark in world.landmarks:
             landmark.state.p_pos = np.array([0., 0.])
@@ -438,14 +448,14 @@ class Scenario(BaseScenario):
             current_accel_a_max = 5.0
             
             # 防守者（陪练）：初始极速 0.5，推力 0.5 (像乌龟一样极低) -> 随着轮数增加，恢复到满血 3.0
-            current_v_d_max = 0.5 + (3.0 - 0.5) * cl_ratio
-            current_accel_d_max = 0.5 + (3.0 - 0.5) * cl_ratio
+            current_v_d_max = 1.5 + (3.0 - 1.5) * cl_ratio
+            current_accel_d_max = 1.5 + (4.0 - 1.5) * cl_ratio # 3.0原本
             
         else:
             # 【阶段 B：训练防守者】
             # 防守者（主角）：始终保持正常的机动性水平
             current_v_d_max = 3.0
-            current_accel_d_max = 3.0
+            current_accel_d_max = 4.0
             
             # 攻击者（陪练）：初始极速 3.5 (比防守者的 3.0 高一点点)，推力 3.5 -> 随轮数增加，飙升到极速 5.4 和推力 5.0
             current_v_a_max = 3.5 + (5.4 - 3.5) * cl_ratio
@@ -504,12 +514,12 @@ class Scenario(BaseScenario):
         # =======================================================
         # 1. 终端价值函数 (Terminal Value Function, 论文 Eq. 14)
         # =======================================================
-        if any(np.linalg.norm(a.state.p_pos - target.state.p_pos) <= self.catch_radius for a in world.attackers):
+        if any(np.linalg.norm(a.state.p_pos - target.state.p_pos) <= (self.catch_radius + a.size) for a in world.attackers):
             agent.done = True
             world.targets[0].done = True
             return 50.0  # 胜利时不直接 return，因为还需要结算之前的卡位和距离奖励！
             
-        if np.linalg.norm(agent.state.p_pos - target.state.p_pos) >= R_B:
+        if np.linalg.norm(agent.state.p_pos - target.state.p_pos) - agent.size >= R_B:
             agent.done = True
             return -50.0 # 彻底失败（出界/死亡）必须直接 Return！否则它死后的废弃坐标会扰乱下面的阿波罗尼斯计算产生巨额负分！
 
@@ -524,7 +534,7 @@ class Scenario(BaseScenario):
         rew -= 0.02
 
         # ================= 动态物理半径碰撞判定 (攻击者视角) =================
-        W_O = 20.0           
+        W_O = 60.0           
         
         g_o_att = 0.0
         is_hard_collision_att = False
@@ -537,9 +547,9 @@ class Scenario(BaseScenario):
             
             # 【终极修复】：动态获取真实物理半径
             R_BODY = agent.size + other_agent.size  
-            R_SAFE_COLLISION = R_BODY + 3.0       # 3.0
+            R_SAFE_COLLISION = R_BODY + 6.0       # 3.0
             
-            if dist <= (R_BODY + 0.0): # 硬碰撞判定，允许有 1 米的误差容忍
+            if dist <= (R_BODY + 1.0): # 硬碰撞判定，允许有 1 米的误差容忍
                 is_hard_collision_att = True
                 break  
             elif dist < R_SAFE_COLLISION:
@@ -550,7 +560,7 @@ class Scenario(BaseScenario):
             rew -= W_O
             agent.done = True # 解除注释！攻击者被撞毁必须立刻阵亡，停止计算！
         else:
-            rew -= W_O * g_o_att * 0.2
+            rew -= 10.0 * g_o_att * 0.2
         # =================================================================================
 
         # ================= 破局补丁：微弱的进攻引导 =================
@@ -561,7 +571,7 @@ class Scenario(BaseScenario):
         # 【修改 2】：动态靠近奖励。圈外给小甜头，敢进圈就给大甜头！
         if curr_dist < R_C:
             # 进了雷达圈，风险极高，重赏勇夫 (权重提高到 0.2)
-            approach_reward = (agent.prev_dist - curr_dist) * 0.2
+            approach_reward = (agent.prev_dist - curr_dist) * 0.1 # 0.2
         else:
             # 圈外安全区，微小引导 (权重保持 0.05)
             approach_reward = (agent.prev_dist - curr_dist) * 0.05
@@ -616,6 +626,8 @@ class Scenario(BaseScenario):
                     # 计算防守者的阿波罗尼斯圆参数 O 和 R_o
                     center_rel = vec_ad / (1.0 - lam_sq) 
                     R_O = (lam / (1.0 - lam_sq)) * dist_ad
+                        # 【插入这行代码】：给数学圆套上物理装甲
+                    R_O = max(R_O, def_agent.size + agent.size)
                     
                     # 射线与圆的交点计算 (几何投影法)
                     proj_len = np.dot(center_rel, u_vec)
@@ -691,9 +703,9 @@ class Scenario(BaseScenario):
             # 【终极修复】：动态获取双方真实的物理半径之和 (3.0 + 3.0 = 6.0)
             R_BODY = agent.size + other_agent.size  
             # 安全预警区必须大于物理半径！(比如设置在身体外围 2 米处，即 10.0)
-            R_SAFE_COLLISION = R_BODY + 4.0         
+            R_SAFE_COLLISION = R_BODY + 3.0         
             
-            if dist_ad <= (R_BODY + 0.0): # 硬碰撞判定，允许有 1 米的误差容忍
+            if dist_ad <= (R_BODY + 0.5): # 硬碰撞判定，允许有 1 米的误差容忍
                 is_hard_collision_def = True
     
             elif dist_ad < R_SAFE_COLLISION:
@@ -703,38 +715,44 @@ class Scenario(BaseScenario):
             rew -= W_O   # 恢复硬碰撞惩罚(-10)，必须让他们感到疼，不敢无脑扎堆抢人头
             # agent.done = True # 防守者被撞毁必须立刻阵亡，停止计算！
         else:
-            rew -= W_O * g_o_def * 0.1 # 恢复软避障的排斥场梯度，让他们靠近时就自动散开
+            rew -= W_O * g_o_def * 0.2 # 恢复软避障的排斥场梯度，让他们靠近时就自动散开
 
         # ================= 破局补丁：稳定的密集的防守引导 (追击最近的攻击者) =================
         if len(world.attackers) > 0:
             nearest_attacker = min(world.attackers, key=lambda a: np.linalg.norm(agent.state.p_pos - a.state.p_pos))
             curr_dist_to_att = np.linalg.norm(agent.state.p_pos - nearest_attacker.state.p_pos)
-            if not hasattr(agent, 'prev_dist_to_att') or agent.prev_dist_to_att is None:
-                agent.prev_dist_to_att = curr_dist_to_att
+            
+            # 【修复】：用字典来分别记录每个攻击者的前一帧距离
+            if not hasattr(agent, 'prev_dist_to_att_dict'):
+                agent.prev_dist_to_att_dict = {}
+                
+            # 拿出“这个特定攻击者”的上一帧距离（如果是第一次见，就用当前距离）
+            prev_dist = agent.prev_dist_to_att_dict.get(nearest_attacker.name, curr_dist_to_att)
             
             # 只有“攻击者-目标”距离进入 R_C 内，才给追击引导奖励
             dist_att_to_target = np.linalg.norm(nearest_attacker.state.p_pos - target.state.p_pos)
             if dist_att_to_target <= R_C:
-                approach_reward_def = (agent.prev_dist_to_att - curr_dist_to_att) * 0.0
+                approach_reward_def = (prev_dist - curr_dist_to_att) * 0.0
                 # rew += approach_reward_def
-            # 无论是否在 R_C 内，都更新记忆，避免下一次突变
-            agent.prev_dist_to_att = curr_dist_to_att
+                
+            # 无论是否在 R_C 内，都更新【字典】里的记忆
+            agent.prev_dist_to_att_dict[nearest_attacker.name] = curr_dist_to_att
         # =======================================================================
 
         # ================= 核心修改 2：驱逐判定逻辑 =================
         g_d = 0.0
-        # 【修复2】：清理了重复复制的循环，逻辑现在非常干净
         for attacker in world.attackers:
             if not hasattr(attacker, 'rewarded_defenders'):
                 attacker.rewarded_defenders = set()
 
             dist_t = np.linalg.norm(attacker.state.p_pos - target.state.p_pos)
-            is_out = (dist_t >= R_B)
+            is_out = (dist_t - attacker.size >= R_B)
             
             # 只有将敌人驱逐出边界，才算有效拦截
             if is_out:
                 attacker.done = True  
                 if agent.name not in attacker.rewarded_defenders:
+                    # 【按劳分配】：只有距离攻击者 25米以内（亲身参与驱逐）的防守者，才能拿到 g_d = 1.0
                     if np.linalg.norm(agent.state.p_pos - attacker.state.p_pos) <= self.sensing_radius_D:
                         g_d += 1.0  
                         attacker.rewarded_defenders.add(agent.name)
@@ -742,7 +760,6 @@ class Scenario(BaseScenario):
         # 胜利判定：所有攻击者都已经出界
         if all(a.done for a in world.attackers) and (not world.targets[0].done):
             agent.done = True
-            rew += 50.0
            
 
         # =======================================================
@@ -756,10 +773,10 @@ class Scenario(BaseScenario):
         agent_in_rc = np.linalg.norm(agent.state.p_pos - target.state.p_pos) < R_C
 
         for d in world.defenders:
-            d_in_rc = np.linalg.norm(d.state.p_pos - target.state.p_pos) < R_C
+            d_in_rc = np.linalg.norm(d.state.p_pos - target.state.p_pos) - d.size < R_C
             for a in world.attackers:
                 if a.done: continue
-                a_in_rc = np.linalg.norm(a.state.p_pos - target.state.p_pos) < R_C
+                a_in_rc = np.linalg.norm(a.state.p_pos - target.state.p_pos) - a.size < R_C
                 dist_da = np.linalg.norm(d.state.p_pos - a.state.p_pos)
                 # 【修复4】：去掉 d_in_rc 的限制！只要攻击者在圈内，就算受控！
                 if a_in_rc or dist_da <= self.sensing_radius_D:
@@ -767,7 +784,7 @@ class Scenario(BaseScenario):
 
         for attacker in world.attackers:
             if attacker.done: continue
-            a_in_rc = np.linalg.norm(attacker.state.p_pos - target.state.p_pos) < R_C
+            a_in_rc = np.linalg.norm(attacker.state.p_pos - target.state.p_pos)-attacker.size < R_C
             dist_to_me = np.linalg.norm(agent.state.p_pos - attacker.state.p_pos)
             # 【修复5】：去掉 agent_in_rc 的限制！
             if a_in_rc or dist_to_me <= self.sensing_radius_D:
@@ -778,21 +795,39 @@ class Scenario(BaseScenario):
         # =======================================================
         # 3. 瞬时奖励计算 
         # =======================================================
-        w_theta, w_s, w_d = 5.0, 0.1, 50.0 #20.0
-        w_f, w_e, w_step = 0.1, 0.1, -0.02  # 1.0, 0.8, -0.02
+        w_theta, w_s, w_d = 10.0, 0.5, 50.0 #5.0, 0.1, 50.0， 修改：5.0改为了10.0
+        w_f, w_e, w_step = 0.1, 0.5, -0.02  # 0.1, 0.1, -0.02
         
         g_s, g_f, g_e, g_theta = 0.0, 0.0, 0.0, 0.0  
 
-        # ------------------ (a) 计算 g_s (被你误删的推移奖励，必须补回！) ------------------
+        # ------------------ (a) 计算 g_s (推移奖励/惩罚) ------------------
         for attacker in D_eff:
-            curr_dist = np.linalg.norm(attacker.state.p_pos - target.state.p_pos)
+            curr_dist_at = np.linalg.norm(attacker.state.p_pos - target.state.p_pos)
             if not hasattr(attacker, 'prev_dist_for_def'):
                 attacker.prev_dist_for_def = {}
-            prev_dist = attacker.prev_dist_for_def.get(agent.name, curr_dist)
+            prev_dist_at = attacker.prev_dist_for_def.get(agent.name, curr_dist_at)
+            delta_dist_at = curr_dist_at - prev_dist_at
             
-            g_s += (curr_dist - prev_dist) 
-            # print(f'g_s: {g_s}')
-            attacker.prev_dist_for_def[agent.name] = curr_dist
+            curr_dist_da = np.linalg.norm(agent.state.p_pos - attacker.state.p_pos)
+            if not hasattr(agent, 'prev_dist_to_att_dict'):
+                agent.prev_dist_to_att_dict = {}
+            prev_dist_da = agent.prev_dist_to_att_dict.get(attacker.name, curr_dist_da)
+
+            if curr_dist_da <= self.sensing_radius_D:
+                # 25米内，物理生效，推远就给分
+                g_s += delta_dist_at 
+            elif curr_dist_da <= R_C:
+                # 25米~50米，物理盲区！只要防守者拉近了与敌人的距离，直接发钱！
+                intercept_bonus = prev_dist_da - curr_dist_da
+                if intercept_bonus > 0:
+                    g_s += intercept_bonus * 1.0  # 1.0 的超大权重，足够把它砸出 25m 圈外！
+                else:
+                    g_s += delta_dist_at 
+            else:
+                g_s += delta_dist_at
+            
+            attacker.prev_dist_for_def[agent.name] = curr_dist_at
+            agent.prev_dist_to_att_dict[attacker.name] = curr_dist_da
 
         # ------------------ (b) 计算 g_f 和 g_e ------------------
         for attacker in D_neff:
@@ -800,24 +835,31 @@ class Scenario(BaseScenario):
             if not hasattr(attacker, 'prev_dist_for_neff'):
                 attacker.prev_dist_for_neff = {}
             prev_dist = attacker.prev_dist_for_neff.get(agent.name, curr_dist)
-            if curr_dist < R_C:
+            
+            # 【严格对齐论文】：只要敌人在 R_B (100m) 内，推远就给团队加分！
+            if curr_dist < R_B: 
                 g_f += (curr_dist - prev_dist)
-            # print(f'g_f: {g_f}')
+                
             attacker.prev_dist_for_neff[agent.name] = curr_dist
 
+        # ================= 2. 改造 g_e：全队同甘共苦的“非线性恐慌” =================
         active_attackers = [a for a in world.attackers if not a.done]
         if len(active_attackers) > 0:
             intrusion_sum = 0.0
             for a in active_attackers:
                 dist_t = np.linalg.norm(a.state.p_pos - target.state.p_pos)
-                # 【核心修复】：攻击者边缘触及 R_C 即算入侵
-                if dist_t < R_C + a.size:  
-                    intrusion_sum += (R_C + a.size - dist_t) / (R_C + a.size)
+                if dist_t < R_B + a.size:  
+                    # 基础痛觉 + 恐慌爆发 保持不变
+                    intrusion_ratio = (R_B + a.size - dist_t) / (R_B + a.size)
+                    base_danger = intrusion_ratio + 2.0 * (intrusion_ratio ** 2)
+                    
+                    # 【核心修复】：绝对不能有倍数差异！
+                    # 只要敌人靠近，所有人吃一模一样的惩罚！断绝它们互相甩锅逃跑的念头！
+                    intrusion_sum += base_danger 
+
             g_e = -intrusion_sum / len(active_attackers)
-            # print(f'g_e: {g_e}')
 
         # ------------------ (c) 计算 g_theta (纯净的 31 根射线法) ------------------
-        R_A_sen = self.sensing_radius_A
         num_rays = 31 
         delta_theta = np.pi / (num_rays - 1)
 
@@ -828,6 +870,12 @@ class Scenario(BaseScenario):
             if dist_at > 0:
                 attacker_in_rc = np.linalg.norm(attacker.state.p_pos - target.state.p_pos) < R_C
                 
+                # ================= 核心破局：释放阿波罗尼斯射线的真实长度 =================
+                # 抛弃死板的 25m 截断！将射线长度释放为攻击者到基地的真实距离。
+                # 这能在没有任何人工 approach_reward 的前提下，提供极其完美的、符合原论文物理意义的长程梯度！
+                RAY_LENGTH = dist_at 
+                # =========================================================================
+                
                 theta_target = np.arctan2(vec_at[1], vec_at[0])
                 angles = np.linspace(theta_target - np.pi/2, theta_target + np.pi/2, num_rays)
                 
@@ -837,15 +885,14 @@ class Scenario(BaseScenario):
                 actual_v_d = agent.max_speed
                 actual_v_a = attacker.max_speed
                 
-                lam = actual_v_d / actual_v_a   # 放心除！
+                lam = actual_v_d / actual_v_a   
                 lam_sq = lam ** 2
                 
                 for angle in angles:
                     u_vec = np.array([np.cos(angle), np.sin(angle)])
-                    min_hit_dist = R_A_sen + 1.0
+                    # 【修改点 1】：最大检测距离变为 RAY_LENGTH
+                    min_hit_dist = RAY_LENGTH + 1.0  
                     
-                    # 【核心修改】：把 world.defenders 改成了 [agent]
-                    # 逻辑：系统现在只检测“我（当前防御者）”一个人是否遮挡了射向基地的射线
                     for def_agent in [agent]: 
                         def_agent_in_rc = np.linalg.norm(def_agent.state.p_pos - target.state.p_pos) < R_C
                         dist_def_att = np.linalg.norm(def_agent.state.p_pos - attacker.state.p_pos)
@@ -860,6 +907,8 @@ class Scenario(BaseScenario):
                             
                         center_rel = vec_ad / (1.0 - lam_sq) 
                         R_O = (lam / (1.0 - lam_sq)) * dist_ad
+                        # 【插入这行代码】：给数学圆套上物理装甲
+                        R_O = max(R_O, def_agent.size + attacker.size)
                         
                         proj_len = np.dot(center_rel, u_vec)
                         if proj_len > 0:
@@ -871,11 +920,13 @@ class Scenario(BaseScenario):
                                 if 0 < intersect_dist < min_hit_dist:
                                     min_hit_dist = intersect_dist
                     
-                    if min_hit_dist <= R_A_sen:
+                    # 【修改点 2】：权重计算全面挂钩真实距离
+                    if min_hit_dist <= RAY_LENGTH:
                         N_hit += 1
-                        weight = (R_A_sen - min_hit_dist) / R_A_sen
+                        weight = (RAY_LENGTH - min_hit_dist) / RAY_LENGTH 
                         d_theta_vec += weight * u_vec
                 
+                # (后续 A_ratio 和 g_theta 的计算保持原样...)
                 A_ratio = 1.0 - (N_hit / num_rays)
                 coef = delta_theta / np.pi
                 d_theta_vec *= coef
@@ -883,7 +934,6 @@ class Scenario(BaseScenario):
                 norm_d_theta_sq = np.dot(d_theta_vec, d_theta_vec)
                 
                 if norm_d_theta_sq > 1e-8:
-                    # 【核心修复 3】：分母加上 1e-8，彻底粉碎除零导致的 NaN！
                     denominator = np.sqrt(norm_d_theta_sq) * dist_at + 1e-8
                     cos_omega = np.clip(np.dot(d_theta_vec, vec_at) / denominator, -1.0, 1.0)
                     
@@ -901,13 +951,13 @@ class Scenario(BaseScenario):
         # 在返回 rew 之前加入以下逻辑 (大约在 510 行左右)
         dist_to_target = np.linalg.norm(agent.state.p_pos - target.state.p_pos)
 
-        # 领地约束：如果防御者离开 R_C (75m) 太远，给予线性惩罚
-        if dist_to_target > R_C:
-        # 这里的 0.01 是惩罚强度，可以根据实验微调
-            rew -= 0.02 * (dist_to_target - R_C) 
+        # # 领地约束：如果防御者离开 R_C (75m) 太远，给予线性惩罚
+        # if R_B > dist_to_target > R_C:
+        # # 这里的 0.01 是惩罚强度，可以根据实验微调
+        #     rew -= 0.1 * (dist_to_target - R_C) / (R_B-R_C)  # 从 R_C 到 R_B 的距离是 25m，线性增加惩罚到最大 -0.02
     
         # 离岗惩罚：严禁离开最大边界 R_B (125m)
-        if dist_to_target > R_B:
+        if dist_to_target > R_B + 30.0:
             rew -= 2.0  # 施加一个较大的瞬时惩罚，迫使其调头
         return rew
     
@@ -931,30 +981,29 @@ class Scenario(BaseScenario):
         
         target = world.targets[0]
         # 判断每个实体是否在核心防御区 (IoUT 基站覆盖范围)
-        in_rc = np.array([np.linalg.norm(e.state.p_pos - target.state.p_pos) < R_C for e in all_entities])
+        in_rc = np.array([np.linalg.norm(e.state.p_pos - target.state.p_pos) - e.size < R_C for e in all_entities])
         
-        # ================= 第一部分：构建节点特征 (带迷雾遮挡) =================
+        # 获取当前视角的智能体索引
+        agent_idx = all_entities.index(agent)
+        
         for i, entity in enumerate(all_entities):
             type_id = 0.0 if isinstance(entity, Target) else (1.0 if isinstance(entity, Attacker) else 2.0)
-            
             dist = np.linalg.norm(entity.state.p_pos - agent.state.p_pos)
-            agent_idx = all_entities.index(agent)
             
             can_observe = False
             
-            # 1. 目标基地和自己永远可见
             if entity == agent or isinstance(entity, Target):
                 can_observe = True
-            # 2. 当前视角是【防御者】
             elif isinstance(agent, Defender):
+                # 观察者是防守者：如果双方都在 RC 内(连接基站)，或距离小于通信/感知半径
                 if isinstance(entity, Defender):
-                    if in_rc[i] or dist <= self.comm_radius_D:
+                    if (in_rc[agent_idx] and in_rc[i]) or dist <= self.comm_radius_D:
                         can_observe = True
                 elif isinstance(entity, Attacker):
-                    if in_rc[i] or dist <= self.sensing_radius_D:
+                    if (in_rc[agent_idx] and in_rc[i]) or dist <= self.sensing_radius_D:
                         can_observe = True
-            # 3. 当前视角是【攻击者】
             elif isinstance(agent, Attacker):
+                # 观察者是攻击者：没有基站权限，只能靠 25m 本地声纳！
                 if isinstance(entity, Attacker):
                     if dist <= self.comm_radius_A:
                         can_observe = True
@@ -962,7 +1011,6 @@ class Scenario(BaseScenario):
                     if dist <= self.sensing_radius_A:
                         can_observe = True
 
-            # 【执行迷雾遮挡】
             if can_observe:
                 rel_pos_norm = (entity.state.p_pos - agent.state.p_pos) / (R_B * 2.0)
                 rel_vel_norm = (entity.state.p_vel - agent.state.p_vel) / 12.0
@@ -973,41 +1021,38 @@ class Scenario(BaseScenario):
             feat = np.concatenate([rel_pos_norm, rel_vel_norm, [type_id]])
             node_obs.append(feat)
 
-        # ================= 第二部分：构建邻接矩阵 adj (GNN 的通信通道) =================
-        # 给对角线填 1 (Self-loops)。GNN 必须有自环，否则在聚合信息时会遗忘自己的特征！
         np.fill_diagonal(adj, 1.0)
         
         for i in range(num_nodes):
             for j in range(num_nodes):
                 if i == j: continue
                 
+                # e_i 是被观察者 (source)，e_j 是观察者 (target)
                 e_i = all_entities[i]
                 e_j = all_entities[j]
                 dist_ij = np.linalg.norm(e_i.state.p_pos - e_j.state.p_pos)
                 
-                # 连边规则必须与论文中真实的物理通信/感知规则完全一致
                 if isinstance(e_i, Target) or isinstance(e_j, Target):
-                    pass  # 【修复1】：绝对不能设为 1.0！切断基地在 GNN 中的信息泄露通道！
-                elif isinstance(e_i, Defender):
-                    if isinstance(e_j, Defender):
-                        # 【核心修复】：将错误的 and 改为 in_rc[j] 
-                        if in_rc[j] or dist_ij <= self.comm_radius_D:
+                    pass  
+                elif isinstance(e_j, Defender): 
+                    # 观察者 j 是防守者：享有基站广播权限
+                    if isinstance(e_i, Defender):
+                        if (in_rc[j] and in_rc[i]) or dist_ij <= self.comm_radius_D:
                             adj[i, j] = 1.0
-                    elif isinstance(e_j, Attacker):
-                        # 【核心修复】：只要攻击者在圈内或距离近，邻接矩阵就必须连通！
-                        if in_rc[j] or dist_ij <= self.sensing_radius_D:
+                    elif isinstance(e_i, Attacker):
+                        if (in_rc[j] and in_rc[i]) or dist_ij <= self.sensing_radius_D:
                             adj[i, j] = 1.0
-                elif isinstance(e_i, Attacker):
-                    if isinstance(e_j, Attacker):
+                elif isinstance(e_j, Attacker): 
+                    # 观察者 j 是攻击者：没有基站权限
+                    if isinstance(e_i, Attacker):
                         if dist_ij <= self.comm_radius_A:
                             adj[i, j] = 1.0
-                    elif isinstance(e_j, Defender):
+                    elif isinstance(e_i, Defender):
                         if dist_ij <= self.sensing_radius_A:
                             adj[i, j] = 1.0
 
-        # 返回时必须将 node_obs 转换为 float32 格式的 numpy 数组，解决 AttributeError 报错
         return np.array(node_obs, dtype=np.float32), adj
-
+    
     def update_graph(self, world):
         if getattr(world, 'cached_dist_mag', None) is None:
             world.calculate_distances()
@@ -1017,34 +1062,33 @@ class Scenario(BaseScenario):
         all_entities = world.targets + world.attackers + world.defenders
         num_nodes = len(all_entities)
         
-        in_rc = np.array([np.linalg.norm(e.state.p_pos - target.state.p_pos) < R_C for e in all_entities])
+        in_rc = np.array([np.linalg.norm(e.state.p_pos - target.state.p_pos) - e.size < R_C for e in all_entities])
         
         row, col = [], []
         for i in range(num_nodes):
             for j in range(num_nodes):
                 if i == j: continue
                 
+                # i 是被观察者 (source)，j 是观察者 (target)
                 agent_i = all_entities[i]
                 agent_j = all_entities[j]
                 dist_ij = dists[i, j]
                 edge_exists = False
                 
                 if isinstance(agent_j, Target) or isinstance(agent_i, Target):
-                    pass  # 【修复2】：不要让 edge_exists 变成 True，切断边！
-                elif isinstance(agent_i, Defender):
-                    if isinstance(agent_j, Defender):
-                        
-                        if in_rc[j] or dist_ij <= self.comm_radius_D:
+                    pass  
+                elif isinstance(agent_j, Defender):
+                    if isinstance(agent_i, Defender):
+                        if (in_rc[j] and in_rc[i]) or dist_ij <= self.comm_radius_D:
                             edge_exists = True
-                    elif isinstance(agent_j, Attacker):
-                        
-                        if in_rc[j] or dist_ij <= self.sensing_radius_D:
+                    elif isinstance(agent_i, Attacker):
+                        if (in_rc[j] and in_rc[i]) or dist_ij <= self.sensing_radius_D:
                             edge_exists = True
-                elif isinstance(agent_i, Attacker):
-                    if isinstance(agent_j, Attacker):
+                elif isinstance(agent_j, Attacker):
+                    if isinstance(agent_i, Attacker):
                         if dist_ij <= self.comm_radius_A:
                             edge_exists = True
-                    elif isinstance(agent_j, Defender):
+                    elif isinstance(agent_i, Defender):
                         if dist_ij <= self.sensing_radius_A:
                             edge_exists = True
                             
@@ -1055,12 +1099,17 @@ class Scenario(BaseScenario):
         world.edge_list = np.stack([row, col]) if len(row) > 0 else np.empty((2, 0), dtype=int)
         
         if hasattr(world, 'graph_feat_type') and world.edge_list.shape[1] > 0:
-            world.edge_weight = dists[world.edge_list[0], world.edge_list[1]]
+            # 【毁灭性 Bug 修复】：绝对不能把几十米的距离当做图的 edge_weight 传入 GNN！
+            # 修改为统一的连通性权重 1.0，恢复图网络的健康状态。
+            world.edge_weight = np.ones(world.edge_list.shape[1], dtype=np.float32)
         
 
     def get_id(self, agent, world):
+        # ================= 终极真相：这是 GNN 提取自身节点特征的指针！ ================= #
+        # 绝对不能乱改！必须严格返回该智能体在 all_entities 列表中的真实索引位置。
         all_entities = world.targets + world.attackers + world.defenders
         return np.array([all_entities.index(agent)], dtype=np.float32)
+        # =============================================================================== #
   
         
     def info_callback(self, agent, world):

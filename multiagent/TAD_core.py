@@ -317,34 +317,34 @@ class World(object):
     def update_agent_state(self, agent):
         pass
 
-    # get collision forces for any contact between two entities
+    # 修改 TAD_core.py 中的 get_collision_force
     def get_collision_force(self, entity_a, entity_b):
         if (not entity_a.collide) or (not entity_b.collide):
-            return [None, None]  # not a collider
+            return [None, None]  
         if (entity_a is entity_b):
-            return [None, None]  # don't collide against itself
+            return [None, None]  
             
         delta_pos = entity_a.state.p_pos - entity_b.state.p_pos
         dist = np.linalg.norm(delta_pos)
         
-        # ================= 终极防 NaN 核心补丁 =================
         if dist == 0.0:
-            # 如果完全重叠，给一个极微小的随机扰动，否则 delta_pos 为 0 无法产生排斥方向
             dist = 1e-5
             delta_pos = np.random.uniform(-1e-5, 1e-5, self.dim_p)
             
-        # 限制最小物理计算距离 (比如0.1米)
-        # 即使它们发生了极其严重的穿模，也假装它们还有0.1米的距离，防止弹簧力爆炸趋于无穷大
+        # ================= 核心修复：分离方向与距离 =================
+        # 1. 严格提取【单位方向向量】(长度永远为 1.0)
+        unit_dir = delta_pos / dist  
+        
+        # 2. 计算穿透深度 (这里才使用 dist_safe 来防止对数爆炸)
         dist_safe = max(dist, 0.1) 
-        # =======================================================
-
         dist_min = entity_a.size + entity_b.size
-        # softmax penetration
         k = self.contact_margin
         
-        # 【注意】这里原本用的是 dist，现在全部替换为 dist_safe
         penetration = np.logaddexp(0, -(dist_safe - dist_min)/k)*k
-        force = self.contact_force * delta_pos / dist_safe * penetration
+        
+        # 3. 最终受力 = 刚度 * 单位方向 * 穿透深度
+        force = self.contact_force * unit_dir * penetration
+        # ==============================================================
         
         force_a = +force if entity_a.movable else None
         force_b = -force if entity_b.movable else None

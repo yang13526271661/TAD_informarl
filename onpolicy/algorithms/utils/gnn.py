@@ -266,7 +266,7 @@ class GNNBase(nn.Module):
                     concat_heads=args.gnn_concat_heads)
         
         self.out_dim = args.gnn_hidden_size * (args.gnn_num_heads if args.gnn_concat_heads else 1)
-        
+        print("GNN Layer",args.gnn_layer_N)
     def forward(self, node_obs:Tensor, adj:Tensor, agent_id:Tensor):
         batch_size, num_nodes, _ = node_obs.shape
         edge_index, edge_attr = SimplifiedAttentionNet.process_adj(adj, self.gnn.max_edge_dist)

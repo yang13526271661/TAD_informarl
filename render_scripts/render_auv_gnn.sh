@@ -3,7 +3,7 @@ export PYTHONPATH=../:$PYTHONPATH
 export WANDB_MODE=offline
 
 # ================= 1. 先配置你想查看的比赛 ================= #
-TARGET_ITER=1
+TARGET_ITER=2
 # EVAL_MODE='attacker'  
 EVAL_MODE='defender' 
 
